@@ -58,12 +58,15 @@ fn truncate_to(s: &str, limit: usize) -> String {
     shortened
 }
 
-fn render_menu(width: usize) -> String {
-    const ENTRIES: [&str; 4] = [
-        "[1] Сканировать IP / CIDR / несколько диапазонов",
-        "[2] Сканировать сети по ASN (RIPEstat)",
-        "[3] Сканировать IP/CIDR из файла",
-        "[0] Выход",
+fn render_menu(width: usize, max_domain_length: usize) -> String {
+    let entries = [
+        "[1] Сканировать IP / CIDR / несколько диапазонов".to_owned(),
+        "[2] Сканировать сети по ASN (RIPEstat)".to_owned(),
+        "[3] Сканировать IP/CIDR из файла".to_owned(),
+        format!("[4] Макс. длина домена: {}",
+            if max_domain_length == 0 { "без ограничения".to_owned() }
+            else { max_domain_length.to_string() }),
+        "[0] Выход".to_owned(),
     ];
     // Total frame width includes two borders plus one padding column on
     // either side of its contents.
@@ -72,7 +75,7 @@ fn render_menu(width: usize) -> String {
     let mut lines = Vec::new();
     lines.push(format!("┌{}┐", "─".repeat(full_width - 2)));
     for (idx, text) in std::iter::once("SCAN MENU")
-        .chain(ENTRIES.iter().copied()).enumerate()
+        .chain(entries.iter().map(String::as_str)).enumerate()
     {
         if idx == 1 {
             lines.push(format!("├{}┤", "─".repeat(full_width - 2)));
@@ -85,12 +88,13 @@ fn render_menu(width: usize) -> String {
     lines.into_iter().map(|line| format!("   {line}")).collect::<Vec<_>>().join("\n")
 }
 
-fn args_for_asn(asn: u32, limit: u64, all: bool) -> Result<Cli> {
+fn args_for_asn(asn: u32, limit: u64, all: bool, max_domain_length: usize) -> Result<Cli> {
     let mut args = vec![
         "realitlscanner".to_string(),
         "--asn".to_string(), format!("AS{asn}"),
         "--reality-sni".to_string(),
         "--fast".to_string(),
+        "--max-domain-length".to_string(), max_domain_length.to_string(),
     ];
     if all {
         args.push("--all".into());
@@ -105,7 +109,19 @@ fn parse_limit(s: &str) -> Option<u64> {
     s.parse::<u64>().ok().filter(|n| *n > 0)
 }
 
-async fn choose_asn(identity: &Identity) -> Result<Option<Choice>> {
+fn parse_domain_limit(s: &str) -> Option<usize> {
+    s.trim().parse::<usize>().ok()
+}
+
+fn confirms_yes(answer: &str) -> bool {
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
+}
+
+fn confirms_full_scan(answer: &str) -> bool {
+    answer.eq_ignore_ascii_case("YES")
+}
+
+async fn choose_asn(identity: &Identity, max_domain_length: usize) -> Result<Option<Choice>> {
     let detected = identity.asns.first().map(|n| format!("AS{n}"));
     let message = detected.as_ref()
         .map(|s| format!("   ASN [{s}]: "))
@@ -138,17 +154,17 @@ async fn choose_asn(identity: &Identity) -> Result<Option<Choice>> {
         match option.as_str() {
             "0" => return Ok(None),
             "1" => {
-                let cli = args_for_asn(plan.asn, limit, false)?;
+                let cli = args_for_asn(plan.asn, limit, false, max_domain_length)?;
                 return Ok(Some(Choice { cli, plan: Some(plan) }));
             }
             "2" => {
                 println!("   ВНИМАНИЕ: будет проверено {} IPv4-адресов!",plan.total);
-                let Some(answer) = prompt("   Для подтверждения введите ДА: ")? else { return Ok(None) };
-                if answer != "ДА" {
-                    println!("   Полное сканирование отменено.");
+                let Some(answer) = prompt("   Type YES to confirm full scan: ")? else { return Ok(None) };
+                if !confirms_full_scan(&answer) {
+                    println!("   Full scan cancelled.");
                     continue;
                 }
-                let cli = args_for_asn(plan.asn, limit, true)?;
+                let cli = args_for_asn(plan.asn, limit, true, max_domain_length)?;
                 return Ok(Some(Choice { cli, plan: Some(plan) }));
             }
             "3" => {
@@ -157,10 +173,9 @@ async fn choose_asn(identity: &Identity) -> Result<Option<Choice>> {
                     limit = n;
                     let selected = plan.selected(limit,false);
                     println!("   Будет проверено: {selected} из {} IPv4.",plan.total);
-                    let Some(answer) = prompt("   Начать сканирование? [д/Н]: ")? else { return Ok(None) };
-                    if answer.eq_ignore_ascii_case("д") || answer.eq_ignore_ascii_case("да")
-                        || answer.eq_ignore_ascii_case("y") {
-                        let cli = args_for_asn(plan.asn,limit,false)?;
+                    let Some(answer) = prompt("   Start scan? [y/N]: ")? else { return Ok(None) };
+                    if confirms_yes(&answer) {
+                        let cli = args_for_asn(plan.asn,limit,false,max_domain_length)?;
                         return Ok(Some(Choice {cli,plan:Some(plan)}));
                     }
                 } else {
@@ -176,14 +191,28 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("Для пакетного запуска укажите --addr, --asn, --in или --url");
     }
+    let mut max_domain_length = 40usize;
     loop {
         // Leave 3 columns for left indentation and one for terminal safety.
         let width = terminal_columns().saturating_sub(4).min(68);
-        println!("\n{}", render_menu(width));
+        println!("\n{}", render_menu(width, max_domain_length));
         let Some(choice) = prompt("   Выбор: ")? else { return Ok(None) };
         if matches!(choice.as_str(), "0" | "q" | "Q") { return Ok(None) };
         if choice == "2" {
-            if let Some(selected) = choose_asn(identity).await? { return Ok(Some(selected)) }
+            if let Some(selected) = choose_asn(identity, max_domain_length).await? { return Ok(Some(selected)) }
+            continue;
+        }
+        if choice == "4" {
+            let Some(value) = prompt("   Max domain length in characters [0 = unlimited]: ")?
+                else { return Ok(None) };
+            match parse_domain_limit(&value) {
+                Some(n) => {
+                    max_domain_length = n;
+                    println!("   Domain limit updated: {}",
+                        if n == 0 { "unlimited".to_owned() } else { n.to_string() });
+                }
+                None => eprintln!("   Invalid length: enter a nonnegative integer."),
+            }
             continue;
         }
         let mut args = vec!["realitlscanner".to_owned()];
@@ -201,6 +230,7 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
             _ => { eprintln!("   Неизвестный пункт меню."); continue }
         }
         args.push("--reality-sni".to_string());
+        args.extend(["--max-domain-length".to_owned(), max_domain_length.to_string()]);
         // A lone bare IP retains legacy deep-scan infinite walk; other finite
         // IPv4/CIDR lists use the fast SYN discovery stage by default.
         if choice == "3" || args.get(2).is_some_and(|value| value.contains('/') || value.contains(',')) {
@@ -219,9 +249,9 @@ mod tests {
     #[test]
     fn all_menu_borders_have_same_column_width() {
         for width in [24,32,48,60,68] {
-            let output=render_menu(width);
+            let output=render_menu(width, 40);
             let cols:Vec<usize>=output.lines().map(cell_width).collect();
-            assert_eq!(cols.len(),8);
+            assert_eq!(cols.len(),9);
             assert!(cols.iter().all(|n| *n==width+3), "{cols:?}");
             for line in output.lines() {
                 assert!(matches!(line.chars().last(), Some('┐' | '┤' | '│' | '┘')));
@@ -230,7 +260,7 @@ mod tests {
     }
     #[test]
     fn standard_width_preserves_longest_option() {
-        assert!(render_menu(68).contains("[1] Сканировать IP / CIDR / несколько диапазонов"));
+        assert!(render_menu(68, 40).contains("[1] Сканировать IP / CIDR / несколько диапазонов"));
     }
     #[test]
     fn unicode_width_counts_cyrillic_and_wide_glyphs() {
@@ -243,8 +273,17 @@ mod tests {
         assert_eq!(parse_limit("4096"),Some(4096));
         assert_eq!(parse_limit("0"),None);
         assert_eq!(parse_limit("bad"),None);
-        assert_eq!(args_for_asn(14618,10000,false).unwrap().max_ips,10000);
-        assert!(args_for_asn(14618,4096,true).unwrap().all);
-        assert!(args_for_asn(14618,4096,false).unwrap().fast);
+        assert_eq!(args_for_asn(14618,10000,false,25).unwrap().max_ips,10000);
+        assert!(args_for_asn(14618,4096,true,40).unwrap().all);
+        assert!(args_for_asn(14618,4096,false,40).unwrap().fast);
+        assert_eq!(args_for_asn(14618,10000,false,25).unwrap().max_domain_length,25);
+        assert!(render_menu(68,0).contains("без ограничения"));
+        assert_eq!(parse_domain_limit("0"), Some(0));
+        assert_eq!(parse_domain_limit(" 25 "), Some(25));
+        assert_eq!(parse_domain_limit("-1"), None);
+        assert!(confirms_yes("y") && confirms_yes("YES"));
+        assert!(!confirms_yes("д") && !confirms_yes("") && !confirms_yes("n"));
+        assert!(confirms_full_scan("YES") && confirms_full_scan("yes"));
+        assert!(!confirms_full_scan("y") && !confirms_full_scan("ДА"));
     }
 }
