@@ -1,3 +1,4 @@
+mod banner;
 mod cli;
 mod filter;
 mod geo;
@@ -124,6 +125,10 @@ async fn main() -> Result<()> {
     std::env::remove_var("NO_PROXY");
 
     let cli = Cli::parse();
+    // Do not print decoration in --domains-only mode (pipe-safe).
+    if !cli.domains_only {
+        banner::show();
+    }
     init_tracing(cli.verbose, cli.domains_only);
 
     let cfg = build_client_config()?;
