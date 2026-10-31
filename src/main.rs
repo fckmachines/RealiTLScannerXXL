@@ -202,11 +202,7 @@ async fn main() -> Result<()> {
     // --- writer ---
     let out_path = cli.out.clone();
     let domains_only = cli.domains_only;
-    let writer_handle = tokio::spawn(async move {
-        if let Err(e) = output::writer(rx_rec, out_path, domains_only).await {
-            tracing::error!(error = %e, "writer failed");
-        }
-    });
+    let writer_handle = tokio::spawn(output::writer(rx_rec, out_path, domains_only));
 
     // --- workers ---
     let mut workers = JoinSet::new();
@@ -281,7 +277,7 @@ async fn main() -> Result<()> {
 
     // At this point, workers are done; drop the last Record sender by waiting
     // for the writer.
-    writer_handle.await?;
+    writer_handle.await??;
     if let Some(handle) = progress_handle {
         handle.abort();
     }
