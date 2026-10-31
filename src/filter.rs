@@ -65,6 +65,13 @@ const PARKED_MARKERS: &[&str] = &[
     "godaddy.com/domainsearch",
 ];
 
+/// Limit user-facing certificate hostnames by Unicode scalar values.
+/// DNS hostnames normally are ASCII; this keeps the limit understandable
+/// for unusual certificate CN text. A zero cap means no filtering.
+pub fn is_domain_too_long(domain: &str, max_chars: usize) -> bool {
+    max_chars != 0 && domain.chars().count() > max_chars
+}
+
 /// A cert with a wildcard CN cannot be used as SNI literally — the client
 /// needs a concrete hostname under the wildcard, which the scanner does not
 /// discover.
@@ -170,6 +177,16 @@ pub async fn check_http(cn: &str, ip: IpAddr, port: u16, timeout: Duration) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_length_exact_boundary_and_disabled() {
+        assert!(!is_domain_too_long("x".repeat(40).as_str(), 40));
+        assert!(is_domain_too_long("x".repeat(41).as_str(), 40));
+        assert!(!is_domain_too_long("x".repeat(256).as_str(), 0));
+        assert!(is_domain_too_long("xn--very-long-domain.example", 10));
+        assert!(!is_domain_too_long("привет.рф", 9));
+        assert!(is_domain_too_long("привет.рф", 8));
+    }
 
     #[test]
     fn wildcard_cn_rejected() {

@@ -10,6 +10,7 @@ pub enum Outcome {
     DnsFailed,
     ConnectionFailed,
     TlsIncompatible,
+    DomainTooLong,
     WildcardCert,
     SharedCdn,
     ExcludedGeo,
@@ -18,11 +19,12 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Accepted,
         Self::DnsFailed,
         Self::ConnectionFailed,
         Self::TlsIncompatible,
+        Self::DomainTooLong,
         Self::WildcardCert,
         Self::SharedCdn,
         Self::ExcludedGeo,
@@ -36,6 +38,7 @@ impl Outcome {
             Self::DnsFailed => "DNS не разрешился",
             Self::ConnectionFailed => "Нет TCP/TLS ответа",
             Self::TlsIncompatible => "TLS/ALPN/сертификат",
+            Self::DomainTooLong => "Слишком длинный домен",
             Self::WildcardCert => "Wildcard-сертификат",
             Self::SharedCdn => "Общий CDN-сертификат",
             Self::ExcludedGeo => "Исключённая страна",
@@ -46,7 +49,7 @@ impl Outcome {
 }
 
 pub struct Stats {
-    counts: [AtomicU64; 9],
+    counts: [AtomicU64; 10],
 }
 
 impl Default for Stats {
@@ -59,7 +62,7 @@ impl Default for Stats {
 
 #[derive(Clone, Copy)]
 pub struct Snapshot {
-    counts: [u64; 9],
+    counts: [u64; 10],
 }
 
 impl Snapshot {
@@ -117,12 +120,14 @@ mod tests {
         stats.record(Outcome::Accepted);
         stats.record(Outcome::HttpFailed);
         stats.record(Outcome::ConnectionFailed);
+        stats.record(Outcome::DomainTooLong);
         let snapshot = stats.snapshot();
-        assert_eq!(snapshot.processed(), 3);
+        assert_eq!(snapshot.processed(), 4);
         assert_eq!(snapshot.accepted(), 1);
-        assert_eq!(snapshot.rejected(), 2);
+        assert_eq!(snapshot.rejected(), 3);
         let summary = snapshot.summary(Duration::from_secs(2));
-        assert!(summary.contains("Проверено: 3"));
+        assert!(summary.contains("Проверено: 4"));
+        assert!(summary.contains("Слишком длинный домен"));
         assert!(summary.contains("HTTPS на IP"));
     }
 }
