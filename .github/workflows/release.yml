@@ -3,10 +3,12 @@ name: Test and release (Linux AMD64)
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: realitlscanner-release
@@ -14,6 +16,8 @@ concurrency:
 
 jobs:
   build-and-release:
+    permissions:
+      contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -39,6 +43,7 @@ jobs:
           ./target/release/realitlscanner --help >/dev/null
 
       - name: Publish release when version is new
+        if: github.event_name != 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
