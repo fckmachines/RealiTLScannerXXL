@@ -23,6 +23,8 @@ pub struct ProbeParams {
     pub ipv6: bool,
     pub reality_sni: bool,
     pub check_http: bool,
+    /// Maximum CN character count, checked before DNS/HTTPS (0 = unlimited).
+    pub max_domain_length: usize,
     pub exclude_geo: Arc<Vec<String>>,
 }
 
@@ -123,6 +125,18 @@ pub async fn probe(
                 return Outcome::TlsIncompatible;
             }
 
+            // The CN is the scanner's SNI/Host candidate. Enforce its length
+            // immediately after the TLS handshake, before forward DNS or
+            // the additional IP-pinned HTTPS connection.
+            if domain_too_long(&r.cn, params.max_domain_length) {
+                tracing::debug!(
+                    %ip, cn = %r.cn, length = r.cn.chars().count(),
+                    limit = params.max_domain_length,
+                    "certificate domain is longer than the configured limit"
+                );
+                return Outcome::DomainTooLong;
+            }
+
             let geo_code = geo.country_code(ip);
             if params.reality_sni && filter::is_wildcard_cn(&r.cn) {
                 tracing::debug!(%ip, cn = %r.cn, "reality-sni: wildcard CN");
@@ -163,5 +177,32 @@ pub async fn probe(
             }
             Outcome::Accepted
         }
+    }
+}
+
+#[inline]
+fn domain_too_long(cn: &str, max_characters: usize) -> bool {
+    max_characters != 0 && cn.chars().count() > max_characters
+}
+
+#[cfg(test)]
+mod length_tests {
+    use super::domain_too_long;
+
+    #[test]
+    fn exactly_at_boundary_is_accepted() {
+        assert!(!domain_too_long("abc.example", 11));
+        assert!(domain_too_long("abc.example", 10));
+    }
+
+    #[test]
+    fn zero_disables_length_check() {
+        assert!(!domain_too_long("very-long.example.org", 0));
+    }
+
+    #[test]
+    fn unicode_is_counted_as_characters_not_utf8_bytes() {
+        assert!(!domain_too_long("пример.рф", 9));
+        assert!(domain_too_long("пример.рф", 8));
     }
 }
