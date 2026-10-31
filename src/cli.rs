@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=60))]
     pub fast_wait: u32,
 
+    /// Maximum characters in certificate Common Name (CN); 0 disables filter
+    #[arg(long, default_value_t = 32, value_name = "CHARS")]
+    pub max_domain_length: usize,
+
     /// Concurrent probe tasks
     #[arg(long, default_value_t = 32)]
     pub thread: usize,
@@ -168,6 +172,21 @@ mod tests {
     }
 
     #[test]
+    fn domain_length_limit_is_configurable() {
+        let custom = Cli::try_parse_from([
+            "x", "--addr", "192.0.2.1/32", "--max-domain-length", "48"
+        ]).unwrap();
+        assert_eq!(custom.max_domain_length, 48);
+        let disabled = Cli::try_parse_from([
+            "x", "--addr", "192.0.2.1/32", "--max-domain-length", "0"
+        ]).unwrap();
+        assert_eq!(disabled.max_domain_length, 0);
+        assert!(Cli::try_parse_from([
+            "x", "--addr", "192.0.2.1/32", "--max-domain-length", "-5"
+        ]).is_err());
+    }
+
+    #[test]
     fn custom_port_parses() {
         let cli = Cli::try_parse_from(["x", "--addr", "1.1.1.1", "--port", "8443"]).unwrap();
         assert_eq!(cli.port, 8443);
@@ -179,6 +198,7 @@ mod tests {
         assert_eq!(cli.port, 443);
         assert_eq!(cli.thread, 32);
         assert_eq!(cli.timeout, 10);
+        assert_eq!(cli.max_domain_length, 32);
         assert!(!cli.fast);
         assert_eq!(cli.fast_rate, 1000);
         assert_eq!(cli.fast_wait, 5);
