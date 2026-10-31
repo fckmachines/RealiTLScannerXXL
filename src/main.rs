@@ -7,18 +7,21 @@ mod iterate;
 mod output;
 mod resolver;
 mod scanner;
+mod stats;
 
 use crate::cli::Cli;
 use crate::geo::Geo;
 use crate::host::Host;
 use crate::output::Record;
 use crate::resolver::DnsResolver;
+use crate::stats::Stats;
 use anyhow::Result;
 use clap::Parser;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::ring as ring_provider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
+use std::io::IsTerminal;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinSet;
@@ -76,7 +79,7 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 fn init_tracing(verbose: bool, domains_only: bool) {
-    let level = if verbose { "debug" } else { "info" };
+    let level = if verbose { "debug" } else { "warn" };
     // Pin hickory to `warn` so a large domain sweep does not flood stderr with
     // per-query trace lines even if the user cranks `realitlscanner` to debug.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -142,25 +145,8 @@ async fn main() -> Result<()> {
     let thread_count = cli.thread.max(1);
     let timeout_dur = Duration::from_secs(cli.timeout);
 
-    // `--reality-sni` implies `--check-http`. Build a shared reqwest client
-    // once if either flag asks for HTTP probing, otherwise leave it None.
+    // Strict Reality filtering includes IP-pinned HTTPS verification.
     let check_http = cli.check_http || cli.reality_sni;
-    let http_client: Option<Arc<reqwest::Client>> = if check_http {
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .connect_timeout(timeout_dur)
-            .timeout(timeout_dur)
-            .redirect(reqwest::redirect::Policy::limited(3))
-            .user_agent(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
-                 AppleWebKit/537.36 (KHTML, like Gecko) \
-                 Chrome/120.0.0.0 Safari/537.36",
-            )
-            .build()?;
-        Some(Arc::new(client))
-    } else {
-        None
-    };
 
     // Build one `ProbeParams` up front; workers clone it per spawn (cheap —
     // `exclude_geo` is an Arc and the rest is Copy).
@@ -182,6 +168,7 @@ async fn main() -> Result<()> {
     let rec_cap = (thread_count * 2).max(256);
     let (tx_host, rx_host) = async_channel::bounded::<Host>(thread_count * 4);
     let (tx_rec, rx_rec) = async_channel::bounded::<Record>(rec_cap);
+    let stats = Arc::new(Stats::default());
 
     // --- producer ---
     let ipv6 = cli.ipv6;
@@ -228,21 +215,21 @@ async fn main() -> Result<()> {
         let connector = connector.clone();
         let resolver = resolver.clone();
         let geo = geo.clone();
-        let http_client = http_client.clone();
+        let stats = stats.clone();
         let out = tx_rec.clone();
         let params = params.clone();
         workers.spawn(async move {
             while let Ok(h) = rx.recv().await {
-                scanner::probe(
+                let outcome = scanner::probe(
                     h,
                     connector.clone(),
                     resolver.clone(),
                     geo.clone(),
-                    http_client.clone(),
                     out.clone(),
                     &params,
                 )
                 .await;
+                stats.record(outcome);
             }
         });
     }
@@ -252,7 +239,30 @@ async fn main() -> Result<()> {
     drop(tx_rec);
 
     let started = std::time::Instant::now();
-    tracing::info!("Started all scanning threads");
+    let show_progress = !cli.domains_only && std::io::stdout().is_terminal();
+    if show_progress {
+        println!("SCAN | threads: {} | port: {} | HTTP bound to scanned IP: {}",
+            thread_count, cli.port, if check_http { "YES" } else { "NO" });
+        println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
+    }
+    let progress_handle = if show_progress {
+        let stats = stats.clone();
+        Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let snapshot = stats.snapshot();
+                eprintln!("[SCAN] проверено: {} | кандидатов: {} | отклонено: {} | {:.1} IP/с",
+                    snapshot.processed(),
+                    snapshot.accepted(),
+                    snapshot.rejected(),
+                    snapshot.processed() as f64 / started.elapsed().as_secs_f64().max(0.001));
+            }
+        }))
+    } else {
+        None
+    };
 
     // Coordinated shutdown: watch for ctrl_c; when it fires, abort the
     // producer so it drops its Host sender, which lets workers drain and
@@ -271,10 +281,14 @@ async fn main() -> Result<()> {
 
     // At this point, workers are done; drop the last Record sender by waiting
     // for the writer.
-    let _ = writer_handle.await;
-
-    let elapsed = started.elapsed();
-    tracing::info!(elapsed = ?elapsed, "Scanning completed");
+    writer_handle.await?;
+    if let Some(handle) = progress_handle {
+        handle.abort();
+    }
+    if !cli.domains_only {
+        println!("\nИТОГ СКАНИРОВАНИЯ\n{}", stats.snapshot().summary(started.elapsed()));
+        println!("Примечание: TLS/HTTPS-кандидат не гарантирует совместимость с Xray REALITY.");
+    }
 
     Ok(())
 }
