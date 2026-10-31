@@ -1,0 +1,74 @@
+name: Test and release (Linux AMD64)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: realitlscanner-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate installer
+        run: |
+          bash -n install.sh
+          bash install.sh --help >/dev/null
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Build Linux AMD64
+        run: cargo build --release --locked
+
+      - name: Smoke test binary
+        run: |
+          set -euo pipefail
+          ./target/release/realitlscanner --version
+          ./target/release/realitlscanner --help >/dev/null
+
+      - name: Publish release when version is new
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Cargo version" >&2; exit 1; }
+          tag="v$version"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping publication."
+            exit 0
+          fi
+
+          mkdir -p dist
+          install -m 755 target/release/realitlscanner dist/realitlscanner-linux-amd64
+          (cd dist && sha256sum realitlscanner-linux-amd64 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          gh release create "$tag" \
+            dist/realitlscanner-linux-amd64 dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "RealiTLScannerXXL $tag" \
+            --generate-notes

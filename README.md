@@ -2,6 +2,38 @@
 
 A fast TLS scanner that probes IPs, CIDRs, or domains for servers suitable as a Reality front: TLS 1.3, X25519 key exchange, HTTP/2 (`h2`) ALPN, and a non-empty certificate chain. Rust rewrite of [XTLS/RealiTLScanner](https://github.com/XTLS/RealiTLScanner).
 
+## Quick install — Linux AMD64
+
+This fork provides prebuilt **Linux x86_64 (AMD64)** binaries in
+[GitHub Releases](https://github.com/fckmachines/RealiTLScannerXXL/releases).
+ARM64 builds are not published. Debian 13 and Ubuntu 24.04+ are the intended hosts.
+
+Download the installer and run it (no Rust toolchain or compilation needed):
+
+```bash
+curl -fL https://raw.githubusercontent.com/fckmachines/RealiTLScannerXXL/main/install.sh -o install.sh
+bash install.sh
+```
+
+The installer queries the latest GitHub Release, downloads `realitlscanner-linux-amd64`
+and `SHA256SUMS`, verifies SHA-256 and the binary's version, and then atomically
+installs it at `/usr/local/bin/realitlscanner` (using sudo when required).
+If the installed version is current, it does nothing. It does not automatically downgrade
+a newer local version.
+
+```bash
+bash install.sh --update      # Check and update, without compiling
+bash install.sh --version     # Installed version
+bash install.sh --uninstall   # Remove binary
+bash install.sh --build       # Explicit source build (Debian/Ubuntu; Cargo cache retained)
+realitlscanner --help
+```
+
+A release is published automatically **after tests and a successful AMD64 build** on
+`main`, but only when the version in `Cargo.toml` does not already have a release.
+Do not expect an installer downloaded from a feature branch to work until its first
+release is visible in GitHub Releases.
+
 ## Building
 
 Requirement: Rust 1.75+ (stable).
