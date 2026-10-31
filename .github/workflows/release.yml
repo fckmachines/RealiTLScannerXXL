@@ -46,6 +46,39 @@ jobs:
           set -euo pipefail
           ./target/release/realitlscanner --version
           ./target/release/realitlscanner --help >/dev/null
+          # Exercise FAST -> DEEP wiring deterministically without raw sockets,
+          # privileges, real scans or a dependency on masscan in CI.
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          cat > "$temp/masscan" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          output=""
+          input=""
+          port=""
+          while (( $# )); do
+            case "$1" in
+              -iL) input="$2"; shift 2 ;;
+              -oL) output="$2"; shift 2 ;;
+              -p) port="$2"; shift 2 ;;
+              --rate|--wait) shift 2 ;;
+              *) echo "Unexpected masscan arg: $1" >&2; exit 2 ;;
+            esac
+          done
+          [[ -f "$input" && "$port" == 443 && -n "$output" ]]
+          grep -Fxq '192.0.2.1' "$input"
+          printf 'open tcp 443 192.0.2.1 1700000000\n' > "$output"
+          EOF
+          chmod +x "$temp/masscan"
+          PATH="$temp:$PATH" ./target/release/realitlscanner \
+            --addr 192.0.2.1/32 --fast --fast-rate 100 --fast-wait 1 \
+            --no-network-info --thread 2 --timeout 1 --out "$temp/scan.csv" \
+            >"$temp/stdout" 2>"$temp/stderr"
+          grep -Fq 'Проверено: 1' "$temp/stdout"
+          grep -Fq 'найдено 1 IP' "$temp/stderr"
+          grep -Fq 'IP,ORIGIN,CERT_DOMAIN' "$temp/scan.csv"
+          test ! -e "$temp/out.csv"
+
           # Rejected preflight must never create/truncate an existing CSV.
           probe_csv="$(mktemp)"
           printf 'KEEP_EXISTING_RESULTS' > "$probe_csv"
