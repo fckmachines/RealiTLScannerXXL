@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "realitlscanner", version, about = "Reality-TLS scanner")]
-#[command(group(ArgGroup::new("source").required(true).args(["addr", "input", "url"])))]
+#[command(group(ArgGroup::new("source").required(true).args(["addr", "input", "url", "asn"])))]
 pub struct Cli {
     /// IP, CIDR, domain, or comma-separated finite list of targets
     #[arg(long)]
@@ -16,6 +16,18 @@ pub struct Cli {
     /// URL to crawl for domains
     #[arg(long)]
     pub url: Option<String>,
+
+    /// Fetch observed announced IPv4 prefixes for this ASN from RIPEstat
+    #[arg(long, value_name = "ASN")]
+    pub asn: Option<String>,
+
+    /// Upper bound on IPv4 targets for --asn (increase explicitly for large networks)
+    #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u64).range(1..))]
+    pub max_ips: u64,
+
+    /// Suppress external public-IP/ASN lookup in the interactive banner
+    #[arg(long)]
+    pub no_network_info: bool,
 
     #[arg(long, default_value_t = 443)]
     pub port: u16,
@@ -73,6 +85,7 @@ mod tests {
         assert_eq!(cli.addr.as_deref(), Some("1.1.1.1"));
         assert!(cli.input.is_none());
         assert!(cli.url.is_none());
+        assert!(cli.asn.is_none());
     }
 
     #[test]
@@ -105,6 +118,18 @@ mod tests {
             "x", "--addr", "192.0.2.0/24,198.51.100.0/24"
         ]).unwrap();
         assert_eq!(cli.addr.as_deref(), Some("192.0.2.0/24,198.51.100.0/24"));
+    }
+
+    #[test]
+    fn asn_source_parses() {
+        let cli = Cli::try_parse_from(["x", "--asn", "AS3333"]).unwrap();
+        assert_eq!(cli.asn.as_deref(), Some("AS3333"));
+        assert_eq!(cli.max_ips, 4096);
+    }
+
+    #[test]
+    fn asn_and_addr_are_mutually_exclusive() {
+        assert!(Cli::try_parse_from(["x", "--asn", "AS3333", "--addr", "1.1.1.1"]).is_err());
     }
 
     #[test]
