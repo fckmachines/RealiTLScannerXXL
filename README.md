@@ -34,6 +34,51 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## Interactive menu and VPS network identity
+
+Run `realitlscanner` without arguments in a terminal to open the menu:
+
+```text
+IPv4 (исходящий): 203.0.113.10
+ASN (RIPE RIS):   AS64500
+Сеть:             EXAMPLE-NET
+BGP-префикс:      203.0.113.0/24
+
+[1] Сканировать IP / CIDR / несколько диапазонов
+[2] Сканировать сети по ASN (RIPEstat)
+[3] Сканировать IP/CIDR из файла
+[0] Выход
+```
+
+The banner and network identity are only printed on interactive terminals and
+are suppressed by `--domains-only`. `--no-network-info` disables external
+network identity lookups when the scanner is run with CLI flags.
+
+The IPv4 value is the **outbound public address** as seen by external services,
+not necessarily the private IP on the VPS interface (e.g. behind NAT). The ASN
+and announced BGP prefix are resolved using RIPEstat RIS routing information
+and may be delayed; multiple origin ASNs are possible. Failure to query public
+IP or RIPEstat does not prevent scanning.
+
+### ASN scanning (IPv4)
+
+```bash
+realitlscanner --asn AS3333 --reality-sni --max-ips 4096
+realitlscanner --asn 3333 --reality-sni --max-ips 65536
+```
+
+ASN prefixes are taken from
+[RIPEstat announced-prefixes](https://stat.ripe.net/docs/data-api/api-endpoints/announced-prefixes),
+which reports prefixes observed in a recent time window, not a guaranteed
+current routing table. Only IPv4 prefixes are scanned. An ASN scan will
+**fail before scanning any targets** when its observed prefixes exceed
+`--max-ips` (default 4096); explicitly increase the limit after reviewing
+the scale. ASN scans do not implicitly cover just the current VPS provider.
+Scan only resources you are authorized to probe.
+
+CLI invocations with `--addr`, `--asn`, `--in`, or `--url` continue working
+non-interactively and do not prompt.
+
 ## Scan more addresses
 
 For a controlled scan of a CIDR, use `--addr` with `/24` (256 IPs),
@@ -131,6 +176,9 @@ cargo build --release
 | Flag | Default | Description |
 |---|---|---|
 | `--addr <TARGET>` | — | IP, CIDR, or domain to scan (mutually exclusive with `--in`/`--url`) |
+| `--asn <ASN>` | — | Scan RIPEstat-observed IPv4 prefixes for an ASN |
+| `--max-ips <N>` | `4096` | Maximum IPv4 addresses permitted for --asn |
+| `--no-network-info` | off | Suppress public IPv4/ASN lookup beneath banner |
 | `--in <FILE>` | — | File with targets, one per line |
 | `--url <URL>` | — | URL to crawl for domains |
 | `--port <N>` | `443` | HTTPS port |
