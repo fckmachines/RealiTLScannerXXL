@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(name = "realitlscanner", version, about = "Reality-TLS scanner")]
 #[command(group(ArgGroup::new("source").required(true).args(["addr", "input", "url"])))]
 pub struct Cli {
-    /// IP, CIDR, or domain to scan
+    /// IP, CIDR, domain, or comma-separated finite list of targets
     #[arg(long)]
     pub addr: Option<String>,
 
@@ -21,7 +21,7 @@ pub struct Cli {
     pub port: u16,
 
     /// Concurrent probe tasks
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 32)]
     pub thread: usize,
 
     /// Output CSV (empty disables file)
@@ -53,9 +53,8 @@ pub struct Cli {
     #[arg(long, value_delimiter = ',')]
     pub exclude_geo: Vec<String>,
 
-    /// HTTP GET `/` probe after a feasible TLS handshake: require
-    /// 200/301/302 and a non-parked body. Automatically enabled when
-    /// `--reality-sni` is set.
+    /// IP-pinned HTTPS GET / (CN as SNI/Host, no redirect following).
+    /// Requires 200/301/302 and a non-parked body. Implied by --reality-sni.
     #[arg(long, default_value_t = false)]
     pub check_http: bool,
 
@@ -101,6 +100,14 @@ mod tests {
     }
 
     #[test]
+    fn comma_separated_ranges_parse_as_one_source() {
+        let cli = Cli::try_parse_from([
+            "x", "--addr", "192.0.2.0/24,198.51.100.0/24"
+        ]).unwrap();
+        assert_eq!(cli.addr.as_deref(), Some("192.0.2.0/24,198.51.100.0/24"));
+    }
+
+    #[test]
     fn custom_port_parses() {
         let cli = Cli::try_parse_from(["x", "--addr", "1.1.1.1", "--port", "8443"]).unwrap();
         assert_eq!(cli.port, 8443);
@@ -110,7 +117,7 @@ mod tests {
     fn defaults_match_go_version() {
         let cli = Cli::try_parse_from(["x", "--addr", "1.1.1.1"]).unwrap();
         assert_eq!(cli.port, 443);
-        assert_eq!(cli.thread, 2);
+        assert_eq!(cli.thread, 32);
         assert_eq!(cli.timeout, 10);
         assert_eq!(cli.out, "out.csv");
         assert_eq!(cli.mmdb, PathBuf::from("Country.mmdb"));
