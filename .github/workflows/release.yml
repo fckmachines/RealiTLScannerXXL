@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: realitlscanner-release
+  group: realitlscanner-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
