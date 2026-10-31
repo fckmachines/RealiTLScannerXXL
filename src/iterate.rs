@@ -336,7 +336,10 @@ mod tests {
         from_addr("192.0.2.0/30,198.51.100.9/32".to_owned(), false, dns, tx)
             .await
             .unwrap();
-        let hosts: Vec<Host> = rx.try_iter().collect();
+        let mut hosts = Vec::new();
+        while let Ok(host) = rx.try_recv() {
+            hosts.push(host);
+        }
         assert_eq!(hosts.len(), 5);
         assert_eq!(hosts.first().unwrap().ip.unwrap().to_string(), "192.0.2.0");
         assert_eq!(hosts.last().unwrap().ip.unwrap().to_string(), "198.51.100.9");
