@@ -4,6 +4,8 @@ mod filter;
 mod geo;
 mod host;
 mod iterate;
+mod menu;
+mod network;
 mod output;
 mod resolver;
 mod scanner;
@@ -127,11 +129,31 @@ async fn main() -> Result<()> {
     std::env::remove_var("HTTPS_PROXY");
     std::env::remove_var("NO_PROXY");
 
-    let cli = Cli::parse();
-    // Do not print decoration in --domains-only mode (pipe-safe).
-    if !cli.domains_only {
+    // With no arguments, show an interactive menu rather than clap's
+    // "missing required arguments" error. Scripted calls remain unchanged.
+    let interactive_menu = std::env::args_os().len() == 1;
+    let cli = if interactive_menu {
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            anyhow::bail!("Для пакетного запуска укажите --addr, --asn, --in или --url");
+        }
         banner::show();
-    }
+        let identity = tokio::time::timeout(Duration::from_secs(8), network::discover())
+            .await.unwrap_or_default();
+        identity.display();
+        let Some(cli) = menu::choose()? else { return Ok(()); };
+        cli
+    } else {
+        let cli = Cli::parse();
+        if !cli.domains_only && std::io::stdout().is_terminal() {
+            banner::show();
+            if !cli.no_network_info {
+                let identity = tokio::time::timeout(Duration::from_secs(8), network::discover())
+                    .await.unwrap_or_default();
+                identity.display();
+            }
+        }
+        cli
+    };
     init_tracing(cli.verbose, cli.domains_only);
 
     let cfg = build_client_config()?;
@@ -173,28 +195,26 @@ async fn main() -> Result<()> {
     // --- producer ---
     let ipv6 = cli.ipv6;
     let tx_host_producer = tx_host.clone();
-    let producer: tokio::task::JoinHandle<()> = if let Some(addr) = cli.addr.clone() {
+    let producer: tokio::task::JoinHandle<Result<()>> = if let Some(addr) = cli.addr.clone() {
         let resolver_c = resolver.clone();
         tokio::spawn(async move {
-            if let Err(e) = iterate::from_addr(addr, ipv6, resolver_c, tx_host_producer).await {
-                tracing::error!(error = %e, "producer failed");
-            }
+            iterate::from_addr(addr, ipv6, resolver_c, tx_host_producer).await
+        })
+    } else if let Some(asn) = cli.asn.clone() {
+        let max_ips = cli.max_ips;
+        tokio::spawn(async move {
+            iterate::from_asn(&asn, max_ips, tx_host_producer).await
         })
     } else if let Some(path) = cli.input.clone() {
         tokio::spawn(async move {
-            if let Err(e) = iterate::from_file(&path, ipv6, tx_host_producer).await {
-                tracing::error!(error = %e, "producer failed");
-            }
+            iterate::from_file(&path, ipv6, tx_host_producer).await
         })
     } else if let Some(url) = cli.url.clone() {
         tokio::spawn(async move {
-            if let Err(e) = iterate::from_url(url, ipv6, tx_host_producer).await {
-                tracing::error!(error = %e, "producer failed");
-            }
+            iterate::from_url(url, ipv6, tx_host_producer).await
         })
     } else {
-        // clap's ArgGroup(required=true) should prevent this branch.
-        unreachable!("clap should enforce exactly one of --addr/--in/--url");
+        unreachable!("clap should enforce exactly one source");
     };
     // Drop the outer sender so workers exit once the producer completes.
     drop(tx_host);
@@ -264,23 +284,33 @@ async fn main() -> Result<()> {
     // producer so it drops its Host sender, which lets workers drain and
     // exit. Matches spec item (11).
     let producer_handle = producer;
+    let mut interrupted = false;
     tokio::select! {
         _ = wait_workers(&mut workers) => {
             // Natural completion.
         }
         _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl_c received, shutting down");
+            interrupted = true;
             producer_handle.abort();
             wait_workers(&mut workers).await;
         }
     }
+    // Propagate errors from ASN discovery, missing input files and URL fetching.
+    // Never report an empty run as successful if its producer failed.
+    let producer_result = if interrupted {
+        Ok(())
+    } else {
+        producer_handle.await?
+    };
 
     // At this point, workers are done; drop the last Record sender by waiting
     // for the writer.
-    writer_handle.await??;
+    let writer_result = writer_handle.await?;
     if let Some(handle) = progress_handle {
         handle.abort();
     }
+    producer_result?;
+    writer_result?;
     if !cli.domains_only {
         println!("\nИТОГ СКАНИРОВАНИЯ\n{}", stats.snapshot().summary(started.elapsed()));
         println!("Примечание: TLS/HTTPS-кандидат не гарантирует совместимость с Xray REALITY.");
