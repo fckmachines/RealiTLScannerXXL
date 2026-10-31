@@ -30,6 +30,11 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate installer
+        run: |
+          bash -n install.sh
+          bash install.sh --help >/dev/null
+
       - name: Unit tests
         run: cargo test --locked
 
