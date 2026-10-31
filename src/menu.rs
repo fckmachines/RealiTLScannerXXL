@@ -218,7 +218,7 @@ mod tests {
             assert_eq!(cols.len(),8);
             assert!(cols.iter().all(|n| *n==width+3), "{cols:?}");
             for line in output.lines() {
-                assert!(line.ends_with(['┐','┤','│','┘']));
+                assert!(matches!(line.chars().last(), Some('┐' | '┤' | '│' | '┘')));
             }
         }
     }
