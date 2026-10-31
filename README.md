@@ -60,24 +60,43 @@ and announced BGP prefix are resolved using RIPEstat RIS routing information
 and may be delayed; multiple origin ASNs are possible. Failure to query public
 IP or RIPEstat does not prevent scanning.
 
-### ASN scanning (IPv4)
+### ASN scanning (IPv4) — v0.4.1
+
+When you select **[2]** in the interactive menu, the program first
+loads the ASN's observed IPv4 prefixes from RIPEstat and displays the
+**complete number of unique IPv4 addresses** (CIDR overlaps are merged).
+Before scanning or creating `out.csv` you can choose:
+
+- **[1]** scan at most 4096 unique IPv4 addresses, evenly distributed
+  over the ASN's observed address space
+- **[2]** scan every observed IPv4 address, after entering `ДА`
+- **[3]** set your own maximum and confirm the selected count
+- **[0]** cancel and return to the main menu without touching results
 
 ```bash
-realitlscanner --asn AS3333 --reality-sni --max-ips 4096
-realitlscanner --asn 3333 --reality-sni --max-ips 65536
+# Scan up to 4096 IPs (even when the ASN contains millions):
+realitlscanner --asn AS14618 --reality-sni
+
+# Scan at most 10,000 unique IPs distributed throughout the ASN:
+realitlscanner --asn AS14618 --max-ips 10000 --reality-sni
+
+# Scan the entire observed ASN (explicit, may be huge):
+realitlscanner --asn AS14618 --all --reality-sni
 ```
 
-ASN prefixes are taken from
-[RIPEstat announced-prefixes](https://stat.ripe.net/docs/data-api/api-endpoints/announced-prefixes),
-which reports prefixes observed in a recent time window, not a guaranteed
-current routing table. Only IPv4 prefixes are scanned. An ASN scan will
-**fail before scanning any targets** when its observed prefixes exceed
-`--max-ips` (default 4096); explicitly increase the limit after reviewing
-the scale. ASN scans do not implicitly cover just the current VPS provider.
-Scan only resources you are authorized to probe.
+The program prints "Будет проверено: N из TOTAL" **before** starting
+scanning. Noninteractive partial scans print a warning on stderr, preserving
+machine-readable stdout in `--domains-only` mode. The ASN preflight
+never creates/truncates output when it fails.
 
-CLI invocations with `--addr`, `--asn`, `--in`, or `--url` continue working
-non-interactively and do not prompt.
+The "TOTAL" number describes the unique IPv4 addresses covered by
+[RIPEstat announced-prefixes](https://stat.ripe.net/docs/data-api/api-endpoints/announced-prefixes)
+observations over a time window. It does not guarantee that those addresses
+are currently announced or reachable. The default cap is **4096 probes**,
+**not** a maximum permitted ASN size; the program no longer fails just
+because an ASN contains more addresses than the cap.
+
+Only scan IP ranges that you are authorized to probe.
 
 ## Scan more addresses
 
@@ -177,7 +196,8 @@ cargo build --release
 |---|---|---|
 | `--addr <TARGET>` | — | IP, CIDR, or domain to scan (mutually exclusive with `--in`/`--url`) |
 | `--asn <ASN>` | — | Scan RIPEstat-observed IPv4 prefixes for an ASN |
-| `--max-ips <N>` | `4096` | Maximum IPv4 addresses permitted for --asn |
+| `--max-ips <N>` | `4096` | Maximum IPv4 addresses sampled from the ASN |
+| `--all` | off | Scan entire observed ASN (explicit opt-in) |
 | `--no-network-info` | off | Suppress public IPv4/ASN lookup beneath banner |
 | `--in <FILE>` | — | File with targets, one per line |
 | `--url <URL>` | — | URL to crawl for domains |
