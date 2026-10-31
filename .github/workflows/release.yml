@@ -1,65 +1,64 @@
-name: Release binaries
+name: Test and release (Linux AMD64)
+
 on:
   push:
-    tags: ['v*.*.*']
+    branches: [main]
   workflow_dispatch:
+
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: realitlscanner-release
+  cancel-in-progress: false
+
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: amd64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
+  build-and-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify version and test
-        shell: bash
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Build Linux AMD64
+        run: cargo build --release --locked
+
+      - name: Smoke test binary
         run: |
           set -euo pipefail
-          cargo test --locked
-          version="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\([^"]*\)"/\1/p;}' Cargo.toml | head -1)"
-          if [[ "${GITHUB_REF_TYPE}" == tag && "${GITHUB_REF_NAME}" != "v$version" ]]; then
-            echo "Tag/version mismatch: $GITHUB_REF_NAME != v$version" >&2; exit 1
-          fi
-      - run: cargo build --release --locked
-      - name: Package
+          ./target/release/realitlscanner --version
+          ./target/release/realitlscanner --help >/dev/null
+
+      - name: Publish release when version is new
         shell: bash
-        run: |
-          mkdir -p dist
-          cp target/release/realitlscanner dist/realitlscanner-linux-${{ matrix.arch }}
-          cd dist
-          sha256sum realitlscanner-linux-* > SHA256SUMS-${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.arch }}
-          path: dist/*
-  publish:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: linux-*
-          path: dist
-          merge-multiple: true
-      - name: Publish verified assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        shell: bash
         run: |
           set -euo pipefail
-          cd dist
-          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > SHA256SUMS
-          sha256sum -c SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" realitlscanner-linux-amd64 realitlscanner-linux-arm64 SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid Cargo version" >&2; exit 1; }
+          tag="v$version"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; skipping publication."
+            exit 0
+          fi
+
+          mkdir -p dist
+          install -m 755 target/release/realitlscanner dist/realitlscanner-linux-amd64
+          (cd dist && sha256sum realitlscanner-linux-amd64 > SHA256SUMS && sha256sum -c SHA256SUMS)
+          gh release create "$tag" \
+            dist/realitlscanner-linux-amd64 dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "RealiTLScannerXXL $tag" \
+            --generate-notes
