@@ -34,6 +34,40 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## Certificate domain length limit — v0.5.1
+
+The TLS certificate's Common Name (CN) is used as the candidate domain
+for SNI, DNS verification and IP-pinned HTTPS in this scanner. To avoid
+spending extra time validating very long names, the DEEP stage now rejects
+CNs exceeding **32 Unicode characters by default**. The comparison is
+inclusive: 32 is accepted, 33 is rejected, and the dots are counted.
+
+The limit runs **after** the TLS handshake and basic TLS/ALPN checks,
+but **before** the expensive forward DNS and HTTP validation.
+It cannot speed up Masscan, TCP or the initial TLS handshake, and a
+shorter domain is not necessarily a better or more secure REALITY host.
+A strict limit may exclude legitimate domains.
+
+```bash
+# Default: reject certificate CNs longer than 32 characters
+realitlscanner --asn AS14618 --max-ips 4096 --fast --reality-sni
+
+# Custom threshold
+realitlscanner --asn AS14618 --max-ips 4096 --fast \
+  --max-domain-length 24 --reality-sni
+
+# Completely disable this filter
+realitlscanner --addr 192.0.2.0/24 --max-domain-length 0
+```
+
+In the interactive menu use **[4] Ограничить длину домена сертификата**,
+then set a nonnegative maximum; `0` disables the filter. This setting
+applies to subsequent scans selected in that menu session, including ASN.
+
+The scan header shows the active threshold; final statistics include
+`Длинный домен сертификата` when any candidates are rejected.
+Existing CSV columns and FAST→DEEP operation are unchanged.
+
 ## FAST SCAN — Masscan + Rust DEEP SCAN (v0.5.0)
 
 **Masscan is the only FAST engine.** Existing Rust/Tokio TLS scanning remains
@@ -110,6 +144,7 @@ BGP-префикс:      203.0.113.0/24
 [1] Сканировать IP / CIDR / несколько диапазонов
 [2] Сканировать сети по ASN (RIPEstat)
 [3] Сканировать IP/CIDR из файла
+[4] Ограничить длину домена сертификата
 [0] Выход
 ```
 
