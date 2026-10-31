@@ -63,6 +63,7 @@ fn render_menu(width: usize) -> String {
         "[1] Сканировать IP / CIDR / несколько диапазонов",
         "[2] Сканировать сети по ASN (RIPEstat)",
         "[3] Сканировать IP/CIDR из файла",
+        "[4] Ограничить длину домена сертификата",
         "[0] Выход",
     ];
     // Total frame width includes two borders plus one padding column on
@@ -176,14 +177,32 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("Для пакетного запуска укажите --addr, --asn, --in или --url");
     }
+    let mut max_domain_length = 32usize;
     loop {
         // Leave 3 columns for left indentation and one for terminal safety.
         let width = terminal_columns().saturating_sub(4).min(68);
         println!("\n{}", render_menu(width));
+        println!("   Лимит длины CN: {}", if max_domain_length == 0 {
+            "без ограничения".to_string()
+        } else {
+            format!("{max_domain_length} символов")
+        });
         let Some(choice) = prompt("   Выбор: ")? else { return Ok(None) };
         if matches!(choice.as_str(), "0" | "q" | "Q") { return Ok(None) };
+        if choice == "4" {
+            let Some(value) = prompt("   Максимальная длина CN [32], 0 — отключить: ")? else { return Ok(None) };
+            if value.is_empty() { max_domain_length = 32; continue; }
+            match value.parse::<usize>() {
+                Ok(limit) => max_domain_length = limit,
+                Err(_) => eprintln!("   Неверное число символов."),
+            }
+            continue;
+        }
         if choice == "2" {
-            if let Some(selected) = choose_asn(identity).await? { return Ok(Some(selected)) }
+            if let Some(mut selected) = choose_asn(identity).await? {
+                selected.cli.max_domain_length = max_domain_length;
+                return Ok(Some(selected));
+            }
             continue;
         }
         let mut args = vec!["realitlscanner".to_owned()];
@@ -207,7 +226,10 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
             args.push("--fast".to_string());
         }
         match Cli::try_parse_from(args) {
-            Ok(cli) => return Ok(Some(Choice {cli,plan:None})),
+            Ok(mut cli) => {
+                cli.max_domain_length = max_domain_length;
+                return Ok(Some(Choice {cli,plan:None}));
+            },
             Err(e) => eprintln!("   {e}"),
         }
     }
@@ -221,7 +243,7 @@ mod tests {
         for width in [24,32,48,60,68] {
             let output=render_menu(width);
             let cols:Vec<usize>=output.lines().map(cell_width).collect();
-            assert_eq!(cols.len(),8);
+            assert_eq!(cols.len(),9);
             assert!(cols.iter().all(|n| *n==width+3), "{cols:?}");
             for line in output.lines() {
                 assert!(matches!(line.chars().last(), Some('┐' | '┤' | '│' | '┘')));
@@ -231,6 +253,7 @@ mod tests {
     #[test]
     fn standard_width_preserves_longest_option() {
         assert!(render_menu(68).contains("[1] Сканировать IP / CIDR / несколько диапазонов"));
+        assert!(render_menu(68).contains("[4] Ограничить длину домена сертификата"));
     }
     #[test]
     fn unicode_width_counts_cyrillic_and_wide_glyphs() {
