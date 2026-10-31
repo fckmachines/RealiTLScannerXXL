@@ -1,0 +1,65 @@
+name: Release binaries
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify version and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked
+          version="$(sed -n '/^\[package\]/,/^\[/{s/^version = "\([^"]*\)"/\1/p;}' Cargo.toml | head -1)"
+          if [[ "${GITHUB_REF_TYPE}" == tag && "${GITHUB_REF_NAME}" != "v$version" ]]; then
+            echo "Tag/version mismatch: $GITHUB_REF_NAME != v$version" >&2; exit 1
+          fi
+      - run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/realitlscanner dist/realitlscanner-linux-${{ matrix.arch }}
+          cd dist
+          sha256sum realitlscanner-linux-* > SHA256SUMS-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*
+          path: dist
+          merge-multiple: true
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" realitlscanner-linux-amd64 realitlscanner-linux-arm64 SHA256SUMS --title "$GITHUB_REF_NAME" --generate-notes
