@@ -1,5 +1,6 @@
 //! Interactive entry point. Scripted invocations keep the existing CLI.
 use crate::cli::Cli;
+use crate::network::Identity;
 use anyhow::{bail, Result};
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
@@ -14,7 +15,7 @@ fn prompt(message: &str) -> Result<Option<String>> {
     Ok(Some(line.trim().to_string()))
 }
 
-pub fn choose() -> Result<Option<Cli>> {
+pub fn choose(identity: &Identity) -> Result<Option<Cli>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("Для запуска без терминала укажите --addr, --asn, --in или --url (см. --help)");
     }
@@ -37,8 +38,18 @@ pub fn choose() -> Result<Option<Cli>> {
                 args.extend(["--addr".into(), value]);
             }
             "2" => {
-                let Some(value) = prompt("   ASN (например, AS3333): ")? else { return Ok(None) };
-                if value.is_empty() { continue; }
+                let detected = identity.asns.first().map(|n| format!("AS{n}"));
+                let message = match detected.as_deref() {
+                    Some(asn) => format!("   ASN [{asn}]: "),
+                    None => "   ASN (например, AS3333): ".to_string(),
+                };
+                let Some(value) = prompt(&message)? else { return Ok(None) };
+                let value = if value.is_empty() {
+                    let Some(asn) = detected else { continue };
+                    asn
+                } else {
+                    value
+                };
                 args.extend(["--asn".into(), value]);
                 let Some(limit) = prompt("   Максимум IPv4-адресов [4096]: ")? else { return Ok(None) };
                 let limit = if limit.is_empty() { "4096".to_string() } else { limit };
