@@ -21,9 +21,13 @@ pub struct Cli {
     #[arg(long, value_name = "ASN")]
     pub asn: Option<String>,
 
-    /// Upper bound on IPv4 targets for --asn (increase explicitly for large networks)
+    /// Maximum number of unique IPv4 targets sampled across an ASN
     #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u64).range(1..))]
     pub max_ips: u64,
+
+    /// Scan the entire RIPEstat-observed ASN IPv4 space (no partial cap)
+    #[arg(long, requires = "asn", conflicts_with_all = ["addr", "input", "url"])]
+    pub all: bool,
 
     /// Suppress external public-IP/ASN lookup in the interactive banner
     #[arg(long)]
@@ -125,6 +129,14 @@ mod tests {
         let cli = Cli::try_parse_from(["x", "--asn", "AS3333"]).unwrap();
         assert_eq!(cli.asn.as_deref(), Some("AS3333"));
         assert_eq!(cli.max_ips, 4096);
+        assert!(!cli.all);
+    }
+
+    #[test]
+    fn full_asn_scan_is_explicit() {
+        let cli = Cli::try_parse_from(["x", "--asn", "AS14618", "--all"]).unwrap();
+        assert!(cli.all);
+        assert!(Cli::try_parse_from(["x", "--addr", "1.1.1.1", "--all"]).is_err());
     }
 
     #[test]

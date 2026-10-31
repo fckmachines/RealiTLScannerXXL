@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
     // With no arguments, show an interactive menu rather than clap's
     // "missing required arguments" error. Scripted calls remain unchanged.
     let interactive_menu = std::env::args_os().len() == 1;
-    let cli = if interactive_menu {
+    let (cli, preloaded_asn) = if interactive_menu {
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             anyhow::bail!("Для пакетного запуска укажите --addr, --asn, --in или --url");
         }
@@ -140,8 +140,8 @@ async fn main() -> Result<()> {
         let identity = tokio::time::timeout(Duration::from_secs(8), network::discover())
             .await.unwrap_or_default();
         identity.display();
-        let Some(cli) = menu::choose(&identity)? else { return Ok(()); };
-        cli
+        let Some(choice) = menu::choose(&identity).await? else { return Ok(()); };
+        (choice.cli, choice.plan)
     } else {
         let cli = Cli::parse();
         if !cli.domains_only && std::io::stdout().is_terminal() {
@@ -152,9 +152,28 @@ async fn main() -> Result<()> {
                 identity.display();
             }
         }
-        cli
+        (cli, None)
     };
     init_tracing(cli.verbose, cli.domains_only);
+
+    // Preflight before spawning the writer. Invalid ASN/API requests must
+    // leave an existing out.csv untouched; the same plan is used for scanning.
+    let asn_job = if let Some(asn) = cli.asn.as_ref() {
+        let plan = match preloaded_asn {
+            Some(plan) => plan,
+            None => network::fetch_plan(asn).await?,
+        };
+        let selected = plan.selected(cli.max_ips, cli.all);
+        eprintln!("\n{}", plan.preview(selected));
+        if selected < plan.total {
+            eprintln!("ВНИМАНИЕ: частичная выборка из ASN, это НЕ полный скан.");
+        } else if cli.all {
+            eprintln!("ВНИМАНИЕ: выбран полный скан всех {} IPv4!", plan.total);
+        }
+        Some((plan, selected))
+    } else {
+        None
+    };
 
     let cfg = build_client_config()?;
     // Build the TlsConnector once; internally Arc-backed, so per-worker
@@ -200,10 +219,9 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             iterate::from_addr(addr, ipv6, resolver_c, tx_host_producer).await
         })
-    } else if let Some(asn) = cli.asn.clone() {
-        let max_ips = cli.max_ips;
+    } else if let Some((plan, selected)) = asn_job {
         tokio::spawn(async move {
-            iterate::from_asn(&asn, max_ips, tx_host_producer).await
+            iterate::from_asn(plan, selected, tx_host_producer).await
         })
     } else if let Some(path) = cli.input.clone() {
         tokio::spawn(async move {

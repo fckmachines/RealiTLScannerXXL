@@ -224,26 +224,22 @@ pub async fn from_addr(
     }
 }
 
-/// Resolve an ASN to observed IPv4 announcements. Reject unexpectedly huge
-/// networks unless the user explicitly raises --max-ips.
-pub async fn from_asn(asn: &str, max_ips: u64, sender: Sender<Host>) -> anyhow::Result<()> {
-    let networks = crate::network::prefixes(asn, max_ips).await?;
-    let total: u64 = networks.iter().map(|n| 1u64 << (32 - n.prefix_len())).sum();
-    tracing::warn!(
-        asn = %asn, prefixes = networks.len(), ipv4_addresses = total,
-        "RIPEstat prefixes are observed within a time window; some may no longer be announced"
-    );
-    for network in networks {
-        let origin = network.to_string();
-        for ip in cidr_iter(IpNet::V4(network)) {
-            let host = Host {
-                ip: Some(ip),
-                origin: origin.clone(),
-                kind: HostType::Cidr,
-            };
-            if sender.send(host).await.is_err() {
-                return Ok(());
-            }
+/// Enqueue the already-preflighted ASN sample with bounded memory.
+pub async fn from_asn(
+    plan: crate::network::ScanPlan,
+    selected: u64,
+    sender: Sender<Host>,
+) -> anyhow::Result<()> {
+    let origin = format!("AS{}", plan.asn);
+    for index in 0..selected {
+        let ip = std::net::IpAddr::V4(plan.address_at(index, selected));
+        let host = Host {
+            ip: Some(ip),
+            origin: origin.clone(),
+            kind: HostType::Cidr,
+        };
+        if sender.send(host).await.is_err() {
+            return Ok(());
         }
     }
     Ok(())
