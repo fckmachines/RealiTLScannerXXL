@@ -26,7 +26,7 @@ pub struct Cli {
     pub max_ips: u64,
 
     /// Scan the entire RIPEstat-observed ASN IPv4 space (no partial cap)
-    #[arg(long, requires = "asn")]
+    #[arg(long, requires = "asn", conflicts_with_all = ["addr", "input", "url"])]
     pub all: bool,
 
     /// Suppress external public-IP/ASN lookup in the interactive banner
