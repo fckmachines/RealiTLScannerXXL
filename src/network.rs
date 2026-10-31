@@ -52,15 +52,13 @@ pub async fn discover() -> Identity {
     let Ok(client) = client() else { return result };
 
     for endpoint in ["https://api4.ipify.org", "https://ipv4.icanhazip.com"] {
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            Duration::from_secs(4), client.get(endpoint).send()
-        ).await {
-            if let Ok(Ok(body)) = tokio::time::timeout(
-                Duration::from_secs(3), response.error_for_status().and_then(|r| Ok(r)).unwrap_or_else(|_| unreachable!()).text()
-            ).await {
-                if let Ok(ip) = body.trim().parse::<Ipv4Addr>() {
-                    result.ip = Some(ip);
-                    break;
+        if let Ok(response) = client.get(endpoint).send().await {
+            if let Ok(response) = response.error_for_status() {
+                if let Ok(body) = response.text().await {
+                    if let Ok(ip) = body.trim().parse::<Ipv4Addr>() {
+                        result.ip = Some(ip);
+                        break;
+                    }
                 }
             }
         }
