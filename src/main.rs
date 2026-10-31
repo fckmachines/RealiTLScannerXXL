@@ -140,7 +140,7 @@ async fn main() -> Result<()> {
         let identity = tokio::time::timeout(Duration::from_secs(8), network::discover())
             .await.unwrap_or_default();
         identity.display();
-        let Some(cli) = menu::choose()? else { return Ok(()); };
+        let Some(cli) = menu::choose(&identity)? else { return Ok(()); };
         cli
     } else {
         let cli = Cli::parse();
