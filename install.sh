@@ -1,78 +1,37 @@
 #!/usr/bin/env bash
-# RealiTLScannerXXL installer for Debian/Ubuntu (amd64/arm64).
 set -Eeuo pipefail
-
-REPO="fckmachines/RealiTLScannerXXL"
-REF="${REALITLS_REF:-feature/terminal-banner}"
-BIN_NAME="realitlscanner"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
-
-say() { printf '\n[RealiTLScannerXXL] %s\n' "$*"; }
-die() { printf '[RealiTLScannerXXL] ОШИБКА: %s\n' "$*" >&2; exit 1; }
-
-[[ "$(uname -s)" == Linux ]] || die "Поддерживается только Linux."
-[[ -r /etc/os-release ]] || die "Не удалось определить дистрибутив."
-# shellcheck disable=SC1091
-. /etc/os-release
-case " ${ID:-} ${ID_LIKE:-} " in
-  *debian*|*ubuntu*) ;;
-  *) die "Автоматическая установка поддерживает Debian/Ubuntu." ;;
+REPO=fckmachines/RealiTLScannerXXL
+BASE="https://github.com/$REPO/releases/download"
+DEST="${INSTALL_DIR:-/usr/local/bin}"
+BIN=realitlscanner
+fail(){ echo "Ошибка: $*" >&2; exit 1; }
+command -v curl >/dev/null || fail "Требуется curl"
+command -v sha256sum >/dev/null || fail "Требуется sha256sum"
+case "$(uname -s):$(uname -m)" in
+  Linux:x86_64) asset=realitlscanner-linux-amd64 ;;
+  Linux:aarch64) asset=realitlscanner-linux-arm64 ;;
+  *) fail "Поддерживается Linux x86_64/aarch64" ;;
 esac
-command -v apt-get >/dev/null || die "apt-get не найден."
-
-if (( EUID == 0 )); then
-  SUDO=()
-else
-  command -v sudo >/dev/null || die "Требуется sudo (либо запуск от root)."
-  SUDO=(sudo)
-fi
-
-tmp_dir="$(mktemp -d)"
-cleanup() { rm -rf -- "$tmp_dir"; }
-trap cleanup EXIT
-trap 'die "Установка прервана на строке $LINENO."' ERR
-
-say "Устанавливаем системные зависимости..."
-"${SUDO[@]}" apt-get update
-"${SUDO[@]}" apt-get install -y --no-install-recommends \
-  ca-certificates curl build-essential pkg-config libssl-dev tar gzip
-
-case "$(uname -m)" in
-  x86_64|aarch64) ;;
-  *) die "Поддерживаются только x86_64 и aarch64." ;;
+if (( EUID == 0 )); then sudo_cmd=(); else command -v sudo >/dev/null || fail "Требуется sudo"; sudo_cmd=(sudo); fi
+case "${1:---update}" in
+  --version) if [[ -x "$DEST/$BIN" ]]; then "$DEST/$BIN" --version; else echo "Не установлен"; fi; exit 0 ;;
+  --uninstall) "${sudo_cmd[@]}" rm -f -- "$DEST/$BIN"; echo "Удалён $DEST/$BIN"; exit 0 ;;
+  --update|--install) ;;
+  *) fail "Использование: bash install.sh [--install|--update|--version|--uninstall]" ;;
 esac
-
-# Rust belongs to the invoking user, not to root.
-export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
-export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-export PATH="$CARGO_HOME/bin:$PATH"
-if ! command -v rustup >/dev/null 2>&1; then
-  say "Устанавливаем Rust (rustup, stable)..."
-  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-    -o "$tmp_dir/rustup-init.sh"
-  sh "$tmp_dir/rustup-init.sh" -y --profile minimal --default-toolchain stable
-else
-  say "Обновляем Rust stable..."
-  rustup toolchain install stable --profile minimal
-fi
-
-command -v cargo >/dev/null || die "Cargo не найден после установки Rust."
-say "Скачиваем исходники $REPO ($REF)..."
-curl --proto '=https' --tlsv1.2 -fL --retry 3 \
-  "https://github.com/$REPO/archive/refs/heads/$REF.tar.gz" \
-  -o "$tmp_dir/source.tar.gz"
-mkdir -p "$tmp_dir/src"
-tar -xzf "$tmp_dir/source.tar.gz" -C "$tmp_dir/src" --strip-components=1
-[[ -f "$tmp_dir/src/Cargo.toml" && -f "$tmp_dir/src/Cargo.lock" ]] || die "Архив исходников повреждён."
-
-say "Компилируем release-сборку (cargo --locked)..."
-(cd "$tmp_dir/src" && cargo +stable build --release --locked)
-[[ -x "$tmp_dir/src/target/release/$BIN_NAME" ]] || die "Бинарник после сборки не найден."
-
-say "Устанавливаем $INSTALL_DIR/$BIN_NAME..."
-"${SUDO[@]}" install -d -m 755 "$INSTALL_DIR"
-"${SUDO[@]}" install -m 755 "$tmp_dir/src/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-
-say "Готово: $INSTALL_DIR/$BIN_NAME"
-"$INSTALL_DIR/$BIN_NAME" --version
-printf 'Запуск: %s --help\n' "$BIN_NAME"
+tmp="$(mktemp -d)"; trap 'rm -rf -- "$tmp"' EXIT
+curl -fsSL --retry 3 "https://api.github.com/repos/$REPO/releases/latest" -o "$tmp/release.json"
+tag="$(sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | head -n 1)"
+[[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "Не удалось определить опубликованный релиз"
+current=""
+[[ ! -x "$DEST/$BIN" ]] || current="$("$DEST/$BIN" --version 2>/dev/null | awk '{print $NF}')"
+if [[ "$current" == "${tag#v}" ]]; then echo "Уже установлена актуальная версия $current"; exit 0; fi
+echo "Загружаем $tag ($asset)..."
+curl -fL --retry 3 "$BASE/$tag/$asset" -o "$tmp/$asset"
+curl -fL --retry 3 "$BASE/$tag/SHA256SUMS" -o "$tmp/SHA256SUMS"
+(cd "$tmp" && grep -E "^[0-9a-fA-F]{64}  $asset$" SHA256SUMS | sha256sum -c -) || fail "Ошибка SHA-256"
+chmod 755 "$tmp/$asset"
+"$tmp/$asset" --version
+"${sudo_cmd[@]}" install -d -m 755 "$DEST"
+"${sudo_cmd[@]}" install -m 755 "$tmp/$asset" "$DEST/$BIN"
+echo "Установлено: $DEST/$BIN ($tag)"
