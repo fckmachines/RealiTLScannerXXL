@@ -4,6 +4,7 @@ mod filter;
 mod geo;
 mod host;
 mod iterate;
+mod masscan;
 mod menu;
 mod network;
 mod output;
@@ -156,6 +157,17 @@ async fn main() -> Result<()> {
     };
     init_tracing(cli.verbose, cli.domains_only);
 
+    if cli.fast {
+        anyhow::ensure!(!cli.ipv6, "FAST SCAN поддерживает только IPv4. Уберите --46 или используйте DEEP SCAN.");
+        anyhow::ensure!(cli.url.is_none(), "FAST SCAN не поддерживает --url (домены).");
+        if let Some(target) = &cli.addr {
+            anyhow::ensure!(
+                target.contains('/') || target.contains(','),
+                "FAST SCAN требует конечный диапазон: используйте --addr IP/32, CIDR или список через запятую"
+            );
+        }
+    }
+
     // Preflight before spawning the writer. Invalid ASN/API requests must
     // leave an existing out.csv untouched; the same plan is used for scanning.
     let asn_job = if let Some(asn) = cli.asn.as_ref() {
@@ -237,6 +249,44 @@ async fn main() -> Result<()> {
     // Drop the outer sender so workers exit once the producer completes.
     drop(tx_host);
 
+    let mut producer_handle = Some(producer);
+    // FAST is a distinct, complete discovery stage. Do not open/truncate the
+    // result CSV or start TLS workers until the SYN scan has succeeded.
+    let rx_host = if cli.fast {
+        let workspace = tokio::select! {
+            result = masscan::spool(rx_host) => match result {
+                Ok(workspace) => workspace,
+                Err(err) => {
+                    producer_handle.take().expect("producer exists").abort();
+                    return Err(err);
+                }
+            },
+            _ = tokio::signal::ctrl_c() => {
+                producer_handle.take().expect("producer exists").abort();
+                return Ok(());
+            }
+        };
+        // Failure reading an input file is reported *before* any Masscan
+        // process runs. The private spool directory is then removed.
+        producer_handle.take().expect("producer exists").await??;
+        let discovered = tokio::select! {
+            result = masscan::discover(&workspace, cli.port, cli.fast_rate, cli.fast_wait) => result?,
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+        };
+        let (tx, rx) = async_channel::unbounded();
+        for ip in discovered {
+            tx.try_send(Host {
+                ip: Some(std::net::IpAddr::V4(ip)),
+                origin: ip.to_string(),
+                kind: crate::host::HostType::Ip,
+            })?;
+        }
+        drop(tx);
+        rx
+    } else {
+        rx_host
+    };
+
     // --- writer ---
     let out_path = cli.out.clone();
     let domains_only = cli.domains_only;
@@ -301,24 +351,30 @@ async fn main() -> Result<()> {
     // Coordinated shutdown: watch for ctrl_c; when it fires, abort the
     // producer so it drops its Host sender, which lets workers drain and
     // exit. Matches spec item (11).
-    let producer_handle = producer;
     let mut interrupted = false;
-    tokio::select! {
-        _ = wait_workers(&mut workers) => {
-            // Natural completion.
+    let producer_result = if let Some(producer_handle) = producer_handle {
+        // Legacy DEEP-only mode retains its streaming producer and ctrl-c drain.
+        tokio::select! {
+            _ = wait_workers(&mut workers) => {}
+            _ = tokio::signal::ctrl_c() => {
+                interrupted = true;
+                producer_handle.abort();
+                wait_workers(&mut workers).await;
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            interrupted = true;
-            producer_handle.abort();
-            wait_workers(&mut workers).await;
-        }
-    }
-    // Propagate errors from ASN discovery, missing input files and URL fetching.
-    // Never report an empty run as successful if its producer failed.
-    let producer_result = if interrupted {
-        Ok(())
+        if interrupted { Ok(()) } else { producer_handle.await? }
     } else {
-        producer_handle.await?
+        // FAST stage has already finished; Deep workers only consume the
+        // discovered, finite, and bounded list.
+        tokio::select! {
+            _ = wait_workers(&mut workers) => {}
+            _ = tokio::signal::ctrl_c() => {
+                interrupted = true;
+                workers.abort_all();
+                wait_workers(&mut workers).await;
+            }
+        }
+        Ok(())
     };
 
     // At this point, workers are done; drop the last Record sender by waiting

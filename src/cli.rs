@@ -36,6 +36,18 @@ pub struct Cli {
     #[arg(long, default_value_t = 443)]
     pub port: u16,
 
+    /// FAST SCAN: Masscan SYN discovery then Rust/Tokio DEEP SCAN
+    #[arg(long, conflicts_with = "url")]
+    pub fast: bool,
+
+    /// Masscan maximum packet rate (packets/second)
+    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100000))]
+    pub fast_rate: u32,
+
+    /// Seconds to wait for SYN responses after Masscan finishes sending
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=60))]
+    pub fast_wait: u32,
+
     /// Concurrent probe tasks
     #[arg(long, default_value_t = 32)]
     pub thread: usize,
@@ -145,6 +157,17 @@ mod tests {
     }
 
     #[test]
+    fn fast_cli_settings() {
+        let cli = Cli::try_parse_from(["x","--asn","AS14618","--fast",
+            "--fast-rate","2500","--fast-wait","8"]).unwrap();
+        assert!(cli.fast);
+        assert_eq!(cli.fast_rate,2500);
+        assert_eq!(cli.fast_wait,8);
+        assert!(Cli::try_parse_from(["x","--url","https://example.com","--fast"]).is_err());
+        assert!(Cli::try_parse_from(["x","--addr","192.0.2.0/24","--fast-rate","0"]).is_err());
+    }
+
+    #[test]
     fn custom_port_parses() {
         let cli = Cli::try_parse_from(["x", "--addr", "1.1.1.1", "--port", "8443"]).unwrap();
         assert_eq!(cli.port, 8443);
@@ -156,6 +179,9 @@ mod tests {
         assert_eq!(cli.port, 443);
         assert_eq!(cli.thread, 32);
         assert_eq!(cli.timeout, 10);
+        assert!(!cli.fast);
+        assert_eq!(cli.fast_rate, 1000);
+        assert_eq!(cli.fast_wait, 5);
         assert_eq!(cli.out, "out.csv");
         assert_eq!(cli.mmdb, PathBuf::from("Country.mmdb"));
         assert!(!cli.verbose);
