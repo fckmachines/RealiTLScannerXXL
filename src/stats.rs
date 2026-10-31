@@ -124,7 +124,7 @@ mod tests {
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.processed(), 4);
         assert_eq!(snapshot.accepted(), 1);
-        assert_eq!(snapshot.rejected(), 2);
+        assert_eq!(snapshot.rejected(), 3);
         let summary = snapshot.summary(Duration::from_secs(2));
         assert!(summary.contains("Проверено: 4"));
         assert!(summary.contains("Слишком длинный домен"));
