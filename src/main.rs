@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
         ipv6: cli.ipv6,
         reality_sni: cli.reality_sni,
         check_http,
+        max_domain_length: cli.max_domain_length,
         exclude_geo: Arc::new(
             cli.exclude_geo
                 .iter()
@@ -327,6 +328,9 @@ async fn main() -> Result<()> {
     if show_progress {
         println!("SCAN | threads: {} | port: {} | HTTP bound to scanned IP: {}",
             thread_count, cli.port, if check_http { "YES" } else { "NO" });
+        println!("CERT CN | максимальная длина домена: {}",
+            if cli.max_domain_length == 0 { "без ограничения".to_string() }
+            else { format!("{} символов", cli.max_domain_length) });
         println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
     }
     let progress_handle = if show_progress {
