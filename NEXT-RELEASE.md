@@ -1,10 +1,10 @@
-# Next Release — v0.4.1 (planned)
+# Release v0.4.1 — shipped (2026-10-31)
 
-Two fixes are scheduled: terminal menu frame alignment and ASN scan preflight.
+Both fixes were implemented and published in v0.4.1. This file retains the acceptance plan as a release record. See [v0.4.1](https://github.com/fckmachines/RealiTLScannerXXL/releases/tag/v0.4.1) and [PR #4](https://github.com/fckmachines/RealiTLScannerXXL/pull/4).
 
 ## Fix: terminal SCAN MENU frame alignment
 
-**Status:** planned, not implemented.
+**Status:** implemented, tested and released in v0.4.1.
 
 Observed in v0.4.0 screenshot (2026-10-31): the right border of the SCAN MENU is misaligned and one of the rows extends beyond the frame. The first (longest) menu entry is a likely culprit. Current `src/menu.rs` renders each border/row using manually padded static strings.
 
@@ -27,7 +27,7 @@ Observed in v0.4.0 screenshot (2026-10-31): the right border of the SCAN MENU is
 
 ## Fix: ASN scan should validate scope *before* starting
 
-**Status:** planned, not implemented.
+**Status:** implemented, tested and released in v0.4.1.
 
 Observed on 2026-10-31 with menu option [2] and the detected ASN `AS14618`: the program printed
 `SCAN | threads: 32` and `Результаты сохраняются в: out.csv`, then exited with
@@ -107,4 +107,4 @@ the complete snapshot, with an explicit warning of the exact size.
 8. Rust tests, AMD64 release build and smoke checks pass in GitHub Actions.
 
 **Scope:** terminal UI and ASN preflight. No changes to TLS/HTTP probe logic. Both fixes
-are planned for Linux AMD64 v0.4.1. Release only after successful CI.
+are planned for Linux AMD64 v0.4.1. Released after passing CI (Rust unit tests, AMD64 release build and CSV-preservation smoke test).
