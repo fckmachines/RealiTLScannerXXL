@@ -90,6 +90,7 @@ fn args_for_asn(asn: u32, limit: u64, all: bool) -> Result<Cli> {
         "realitlscanner".to_string(),
         "--asn".to_string(), format!("AS{asn}"),
         "--reality-sni".to_string(),
+        "--fast".to_string(),
     ];
     if all {
         args.push("--all".into());
@@ -200,6 +201,11 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
             _ => { eprintln!("   Неизвестный пункт меню."); continue }
         }
         args.push("--reality-sni".to_string());
+        // A lone bare IP retains legacy deep-scan infinite walk; other finite
+        // IPv4/CIDR lists use the fast SYN discovery stage by default.
+        if choice == "3" || args.get(2).is_some_and(|value| value.contains('/') || value.contains(',')) {
+            args.push("--fast".to_string());
+        }
         match Cli::try_parse_from(args) {
             Ok(cli) => return Ok(Some(Choice {cli,plan:None})),
             Err(e) => eprintln!("   {e}"),
@@ -239,5 +245,6 @@ mod tests {
         assert_eq!(parse_limit("bad"),None);
         assert_eq!(args_for_asn(14618,10000,false).unwrap().max_ips,10000);
         assert!(args_for_asn(14618,4096,true).unwrap().all);
+        assert!(args_for_asn(14618,4096,false).unwrap().fast);
     }
 }
