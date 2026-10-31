@@ -53,7 +53,19 @@ pub async fn writer(
         None
     };
 
+    let mut printed_header = false;
     while let Ok(rec) = rx.recv().await {
+        if !domains_only {
+            if !printed_header {
+                println!("\n{:<40} {:<42} {:<6} {}", "IP", "CERTIFICATE DOMAIN", "GEO", "ISSUER");
+                println!("{}", "-".repeat(105));
+                printed_header = true;
+            }
+            println!(
+                "{:<40} {:<42} {:<6} {}",
+                rec.ip, rec.cert_domain, rec.geo, rec.cert_issuer
+            );
+        }
         if let Some(f) = file.as_mut() {
             let line = format_record(&rec);
             f.write_all(line.as_bytes()).await?;

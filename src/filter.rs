@@ -92,7 +92,7 @@ pub fn is_excluded_geo(geo: &str, exclude_list: &[String]) -> bool {
 /// is enough — parking providers put their branding in the `<head>` or the
 /// top of the `<body>`.
 pub fn is_parked_page(body: &str) -> bool {
-    let head = &body[..body.len().min(16_384)];
+    let head = body.get(..16_384).unwrap_or(body);
     let lower = head.to_ascii_lowercase();
     PARKED_MARKERS.iter().any(|m| lower.contains(m))
 }
@@ -108,26 +108,63 @@ pub async fn forward_verify(dns: &DnsResolver, cn: &str, expected: IpAddr) -> bo
     }
 }
 
-/// HTTP GET `https://{cn}/` and require a 200/301/302 with a non-parked
-/// body. Uses a shared `reqwest::Client` (one per process, Arc-wrapped).
-/// Redirect following is enabled (up to 3 hops) so `301 → 200` is treated
-/// as the final 200.
-pub async fn check_http(client: &reqwest::Client, cn: &str, timeout: Duration) -> bool {
-    let url = format!("https://{}/", cn);
-    let req = client.get(&url).timeout(timeout);
-    let resp = match req.send().await {
-        Ok(r) => r,
-        Err(_) => return false,
+/// Verify the actual scanned IP, not merely the public DNS destination of
+/// the certificate CN. reqwest's `resolve` pins the HTTPS connection to `ip`,
+/// while the URL still supplies the original hostname for SNI, Host, and
+/// certificate hostname validation. Redirects are deliberately NOT followed:
+/// doing so could leave the scanned IP and invalidate the result.
+/// A new client per candidate keeps DNS overrides isolated across concurrent
+/// probes. Body reading is bounded to 16 KiB.
+pub async fn check_http(cn: &str, ip: IpAddr, port: u16, timeout: Duration) -> bool {
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .resolve(cn, std::net::SocketAddr::new(ip, port))
+        .redirect(reqwest::redirect::Policy::none())
+        .https_only(true)
+        .connect_timeout(timeout)
+        .timeout(timeout)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::debug!(%ip, %cn, error = %e, "http client init failed");
+            return false;
+        }
     };
-    let status = resp.status().as_u16();
+    let url = format!("https://{cn}:{port}/");
+    let response = client.get(url).send().await;
+    let mut response = match response {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::debug!(%ip, %cn, error = %e, "IP-pinned HTTPS request failed");
+            return false;
+        }
+    };
+    let status = response.status().as_u16();
     if !matches!(status, 200 | 301 | 302) {
+        tracing::debug!(%ip, %cn, status, "IP-pinned HTTPS status rejected");
         return false;
     }
-    match resp.text().await {
-        Ok(body) => !is_parked_page(&body),
-        // Good status but unreadable body — trust the status line.
-        Err(_) => true,
+
+    let mut body = Vec::with_capacity(16_384);
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                let take = (16_384 - body.len()).min(chunk.len());
+                body.extend_from_slice(&chunk[..take]);
+                if body.len() == 16_384 {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(%ip, %cn, error = %e, "IP-pinned HTTPS body failed");
+                return false;
+            }
+        }
     }
+    let text = String::from_utf8_lossy(&body);
+    !is_parked_page(&text)
 }
 
 #[cfg(test)]
@@ -220,6 +257,12 @@ mod tests {
         ));
         assert!(is_parked_page("Powered by sedoparking.com"));
         assert!(is_parked_page("parkingcrew.net hosted"));
+    }
+
+    #[test]
+    fn parked_page_handles_multibyte_utf8_boundary() {
+        let input = format!("{}🛰️", "a".repeat(16_383));
+        assert!(!is_parked_page(&input));
     }
 
     #[test]

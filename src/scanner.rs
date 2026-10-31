@@ -3,6 +3,7 @@ use crate::geo::Geo;
 use crate::host::{Host, HostType};
 use crate::output::Record;
 use crate::resolver::{self, DnsResolver};
+use crate::stats::Outcome;
 use anyhow::anyhow;
 use rustls::pki_types::ServerName;
 use rustls::ProtocolVersion;
@@ -37,10 +38,9 @@ pub async fn probe(
     connector: TlsConnector,
     dns: Arc<DnsResolver>,
     geo: Arc<Geo>,
-    http_client: Option<Arc<reqwest::Client>>,
     out: async_channel::Sender<Record>,
     params: &ProbeParams,
-) {
+) -> Outcome {
     // DNS if needed (matches Go's lazy LookupIP in ScanTLS). Uses hickory-
     // resolver so lookups are truly async and share a single query cache
     // across workers instead of hopping through the blocking-fs pool once
@@ -50,7 +50,7 @@ pub async fn probe(
             Some(ip) => host.ip = Some(ip),
             None => {
                 tracing::debug!(origin = %host.origin, "no IP");
-                return;
+                return Outcome::DnsFailed;
             }
         }
     }
@@ -102,87 +102,66 @@ pub async fn probe(
     match tokio::time::timeout(params.timeout, probe_fut).await {
         Err(_) => {
             tracing::debug!(%ip, origin = %host.origin, "timeout");
+            Outcome::ConnectionFailed
         }
         Ok(Err(e)) => {
             tracing::debug!(%ip, origin = %host.origin, error = %e, "probe failed");
+            Outcome::ConnectionFailed
         }
         Ok(Ok(r)) => {
             let feasible = matches!(r.version, Some(ProtocolVersion::TLSv1_3))
                 && r.alpn == b"h2"
                 && !r.cn.is_empty()
                 && !r.issuer.is_empty();
-            let geo_code = geo.country_code(ip);
-            if feasible {
-                // Post-filter chain, ordered cheapest to most expensive:
-                //   1. Wildcard CN (string check)            — reality-sni
-                //   2. Shared CDN suffix (string match)      — reality-sni
-                //   3. Geo exclusion (string match)          — --exclude-geo
-                //   4. Forward-verify (one DNS query)        — reality-sni
-                //   5. HTTP GET /  (full TLS+HTTP round trip) — --check-http
-                if params.reality_sni {
-                    if filter::is_wildcard_cn(&r.cn) {
-                        tracing::debug!(%ip, cn = %r.cn, "reality-sni: wildcard CN");
-                        return;
-                    }
-                    if filter::is_shared_cdn_cn(&r.cn) {
-                        tracing::debug!(%ip, cn = %r.cn, "reality-sni: shared CDN cert");
-                        return;
-                    }
-                }
-                if !params.exclude_geo.is_empty()
-                    && filter::is_excluded_geo(&geo_code, &params.exclude_geo)
-                {
-                    tracing::debug!(%ip, geo = %geo_code, "excluded geo");
-                    return;
-                }
-                if params.reality_sni
-                    && !filter::forward_verify(&dns, &r.cn, ip).await
-                {
-                    tracing::debug!(%ip, cn = %r.cn, "reality-sni: forward-verify failed");
-                    return;
-                }
-                if params.check_http {
-                    // `check_http` is set iff a client was built in main.rs,
-                    // so the Option is always Some here. The `as_ref()` +
-                    // early return is belt-and-suspenders.
-                    let Some(client) = http_client.as_ref() else {
-                        tracing::warn!("check_http set but no HTTP client");
-                        return;
-                    };
-                    if !filter::check_http(client, &r.cn, params.timeout).await {
-                        tracing::debug!(%ip, cn = %r.cn, "http check failed");
-                        return;
-                    }
-                }
-                tracing::info!(
-                    %ip,
-                    origin = %host.origin,
-                    tls = "1.3",
-                    alpn = "h2",
-                    cert_domain = %r.cn,
-                    cert_issuer = %r.issuer,
-                    geo = %geo_code,
-                    "Connected (feasible)"
-                );
-                let rec = Record {
-                    ip,
-                    origin: host.origin,
-                    cert_domain: r.cn,
-                    cert_issuer: r.issuer,
-                    geo: geo_code,
-                };
-                let _ = out.send(rec).await;
-            } else {
+            if !feasible {
                 tracing::debug!(
-                    %ip,
-                    origin = %host.origin,
+                    %ip, origin = %host.origin,
                     alpn = %String::from_utf8_lossy(&r.alpn),
-                    cn = %r.cn,
-                    issuer = %r.issuer,
-                    geo = %geo_code,
-                    "not feasible"
+                    cn = %r.cn, issuer = %r.issuer,
+                    "TLS/ALPN/certificate incompatible"
                 );
+                return Outcome::TlsIncompatible;
             }
+
+            let geo_code = geo.country_code(ip);
+            if params.reality_sni && filter::is_wildcard_cn(&r.cn) {
+                tracing::debug!(%ip, cn = %r.cn, "reality-sni: wildcard CN");
+                return Outcome::WildcardCert;
+            }
+            if params.reality_sni && filter::is_shared_cdn_cn(&r.cn) {
+                tracing::debug!(%ip, cn = %r.cn, "reality-sni: shared CDN cert");
+                return Outcome::SharedCdn;
+            }
+            if !params.exclude_geo.is_empty()
+                && filter::is_excluded_geo(&geo_code, &params.exclude_geo)
+            {
+                tracing::debug!(%ip, geo = %geo_code, "excluded geo");
+                return Outcome::ExcludedGeo;
+            }
+            if params.reality_sni && !filter::forward_verify(&dns, &r.cn, ip).await {
+                tracing::debug!(%ip, cn = %r.cn, "reality-sni: forward-verify failed");
+                return Outcome::ForwardDnsFailed;
+            }
+            // This request uses r.cn for SNI and Host but forces TCP to the
+            // scanned ip:port. No redirects are followed to other hosts.
+            if params.check_http
+                && !filter::check_http(&r.cn, ip, params.port, params.timeout).await
+            {
+                tracing::debug!(%ip, cn = %r.cn, "IP-pinned HTTPS check failed");
+                return Outcome::HttpFailed;
+            }
+
+            let rec = Record {
+                ip,
+                origin: host.origin,
+                cert_domain: r.cn,
+                cert_issuer: r.issuer,
+                geo: geo_code,
+            };
+            if out.send(rec).await.is_err() {
+                tracing::warn!("results channel closed");
+            }
+            Outcome::Accepted
         }
     }
 }

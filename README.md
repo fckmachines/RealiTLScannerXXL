@@ -34,6 +34,31 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## Scan more addresses
+
+For a controlled scan of a CIDR, use `--addr` with `/24` (256 IPs),
+`/20` (4,096 IPs), or another range you are authorized to probe.
+Single bare IPs still use the original **infinite neighbour scan**; specify
+`/32` to probe exactly one IP.
+
+```bash
+realitlscanner --addr 192.0.2.0/24 --thread 32 --reality-sni --out results.csv
+realitlscanner --addr "192.0.2.0/24,198.51.100.0/24" --thread 32 --reality-sni
+realitlscanner --in my-ranges.txt --thread 32 --reality-sni --out results.csv
+```
+
+The comma-separated `--addr` form always terminates after its finite list,
+including if one entry is a bare IP. `--in` accepts one IP/CIDR/domain per line.
+Use only ranges you have permission to probe. The scanner shows a candidate table,
+progress every three seconds in an interactive terminal, and a final rejection
+breakdown. `--domains-only` keeps stdout machine-readable and disables the UI.
+
+In `--reality-sni` and `--check-http` mode, HTTPS is **pinned to the scanned
+IP**, with the certificate CN as SNI and Host and normal certificate validation.
+Redirects are **not followed** (301/302 are accepted statuses), so the check
+cannot accidentally switch to a different IP. This improves precision; it does
+not prove end-to-end Xray REALITY compatibility.
+
 ## Building
 
 Requirement: Rust 1.75+ (stable).
@@ -71,7 +96,7 @@ cargo build --release
 # Output CSV path (default: out.csv; empty string disables file output)
 ./target/release/realitlscanner --addr www.microsoft.com --out file.csv
 
-# Concurrent probe tasks (default: 2)
+# Concurrent probe tasks (default: 32)
 ./target/release/realitlscanner --addr wiki.ubuntu.com --thread 100
 
 # Per-target timeout in seconds (default: 10)
@@ -117,7 +142,7 @@ cargo build --release
 | `--domains-only` | off | Also print cert domains to stdout (pipe-safe) |
 | `--reality-sni` | off | Strict filter for Xray Reality `dest` (see below) |
 | `--exclude-geo <LIST>` | none | Comma-separated ISO country codes to drop |
-| `--check-http` | off | Post-TLS HTTP GET `/` check (auto-enabled by `--reality-sni`) |
+| `--check-http` | off | Post-TLS IP-pinned HTTPS GET `/` check (auto-enabled by `--reality-sni`) |
 | `--mmdb <PATH>` | `Country.mmdb` | Path to MaxMind GeoLite2/GeoIP2 Country database |
 
 ### `--reality-sni`
@@ -144,11 +169,11 @@ Comma-separated list of ISO-2 country codes to drop from results. Case-insensiti
 
 ### `--check-http`
 
-After a feasible TLS handshake the scanner issues `GET https://{cert_cn}/` via reqwest and requires:
-- HTTP status 200, 301, or 302 (redirects are followed up to 3 hops)
+After a feasible TLS handshake the scanner issues an IP-pinned `GET https://{cert_cn}/` via reqwest, using the certificate CN as SNI and Host, and requires:
+- HTTP status 200, 301, or 302 (redirects are not followed)
 - Body does not match a parked-page marker (`"domain is for sale"`, known parking providers like HugeDomains/Sedo/ParkingCrew/Bodis, etc.)
 
-The probe uses the cert CN as the hostname, so DNS resolves it independently of the IP the TLS handshake happened on. This verifies the domain is a live public site, not just an orphan cert. `--reality-sni` automatically turns `--check-http` on; the two can also be used independently.
+The probe connects directly to the IP under investigation, not the domain's public DNS result. The CN determines TLS SNI and HTTP Host. It checks the scanned endpoint rather than an unrelated host. `--reality-sni` automatically enables `--check-http`; the flags can also be used independently.
 
 The HTTP check is the most expensive filter (one full TLS + HTTP round-trip per feasible candidate). It runs last in the filter chain so only hosts that survived the cheaper string/DNS checks pay the cost.
 
