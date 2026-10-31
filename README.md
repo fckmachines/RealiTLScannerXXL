@@ -97,6 +97,39 @@ rather than exhausting disk space unexpectedly.
 defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
 or its thread count.
 
+## Domain-length filter and English confirmations (v0.5.1)
+
+RealiTLScannerXXL rejects certificate Common Names (CNs) longer than **40
+Unicode characters by default**. This runs immediately after the TLS
+handshake and certificate inspection, **before** optional forward-DNS
+verification and IP-pinned HTTPS requests, saving time on unsuitable long
+hostnames. If the input itself is a domain (rather than an IP), overlong
+hostnames are skipped before any DNS or TCP connection.
+
+```bash
+# Default cap: 40 characters
+realitlscanner --addr 192.0.2.0/24 --reality-sni
+
+# More restrictive: max 25 certificate CN characters
+realitlscanner --addr 192.0.2.0/24 --max-domain-length 25 --reality-sni
+
+# Disable domain length filtering
+realitlscanner --addr 192.0.2.0/24 --max-domain-length 0 --reality-sni
+```
+
+In the interactive menu use **[4] Max domain length** to configure the
+limit (default 40; 0 disables filtering) before choosing an ASN or target
+source. The setting is applied to both FAST→DEEP and DEEP-only scans.
+
+This checks the **certificate CN**, which is the hostname currently used by
+the existing scanner for its SNI candidates. It does not inspect or limit
+all alternative names (SANs) in the certificate. A limit of 40 can exclude
+otherwise valid targets; raise the limit if you prefer completeness.
+
+Confirmation prompts now use `Start scan? [y/N]` (default **No**) and
+`Type YES to confirm full scan:` instead of Cyrillic confirmation input.
+The rest of the interactive menu remains Russian.
+
 ## Interactive menu and VPS network identity
 
 Run `realitlscanner` without arguments in a terminal to open the menu (FAST mode for finite IPv4 ranges requires the optional Masscan package and network privileges):
@@ -110,6 +143,7 @@ BGP-префикс:      203.0.113.0/24
 [1] Сканировать IP / CIDR / несколько диапазонов
 [2] Сканировать сети по ASN (RIPEstat)
 [3] Сканировать IP/CIDR из файла
+[4] Макс. длина домена: 40
 [0] Выход
 ```
 
@@ -132,7 +166,7 @@ Before scanning or creating `out.csv` you can choose:
 
 - **[1]** scan at most 4096 unique IPv4 addresses, evenly distributed
   over the ASN's observed address space
-- **[2]** scan every observed IPv4 address, after entering `ДА`
+- **[2]** scan every observed IPv4 address, after entering `YES`
 - **[3]** set your own maximum and confirm the selected count
 - **[0]** cancel and return to the main menu without touching results
 
