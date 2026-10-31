@@ -34,9 +34,72 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## FAST SCAN — Masscan + Rust DEEP SCAN (v0.5.0)
+
+**Masscan is the only FAST engine.** Existing Rust/Tokio TLS scanning remains
+the DEEP engine. The menu defaults to FAST for ASN, CIDR and file-based IPv4
+searches; a lone bare IP retains the legacy DEEP scan. CLI mode is backwards
+compatible and requires an explicit `--fast` flag.
+
+On Debian 13 (Trixie), install the optional operating-system dependency:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y masscan
+```
+
+Masscan performs raw SYN transmission and normally needs root or suitable
+network capabilities. Run FAST scans only where you are authorized to do so.
+**Do not automatically grant capabilities to the Rust binary.** Masscan may
+be blocked by a VPS provider or network/firewall. The installer does **not**
+modify nftables, source ports, routing, or firewall rules.
+
+```bash
+# Two-stage ASN sample: 4096 IPs, rate limited to 1000 packets/s
+sudo realitlscanner --asn AS14618 --max-ips 4096 \
+  --fast --fast-rate 1000 --fast-wait 5 \
+  --thread 64 --timeout 5 --reality-sni --out results.csv
+
+# Finite CIDR scan
+sudo realitlscanner --addr 192.0.2.0/24 --fast --fast-rate 500
+
+# Legacy DEEP-only scan, no Masscan
+realitlscanner --asn AS14618 --max-ips 4096 --reality-sni
+```
+
+`192.0.2.0/24` is an RFC 5737 **documentation-only** CIDR. Replace it with
+an authorized network.
+
+FAST workflow:
+
+1. Resolve ASN **once**, select partial/full unique IPv4 targets (from v0.4.1).
+2. Write up to **5 million** finite target IPv4s to a private temporary file.
+3. Execute Masscan with explicit target list, specified TCP port, packet-rate
+   ceiling and bounded response wait.
+4. Parse unique `open tcp PORT IP` results. Only those IPs reach Rust's
+   original TLS 1.3 / HTTP/2 / certificate / DNS / IP-pinned HTTPS checks.
+5. Keep normal CSV results for DEEP candidates, and remove temporary files.
+
+FAST and DEEP counters are different: `[FAST]` reports targets and open TCP
+ports, while the end summary counts only hosts reaching DEEP. A SYN-ACK is
+not proof of a valid TLS service, and Masscan can miss ports when the VPS
+provider drops probes or responses. In that case, use `--fast-wait`, lower
+`--fast-rate` or switch to DEEP-only.
+
+`--fast` accepts finite IPv4/CIDR targets, an ASN, or an IPv4-only input
+file. It does not accept domains, IPv6, `--url`, or a lone bare `--addr IP`
+(which activates the legacy infinite neighbor walk). Use `IP/32` for a
+single finite address. FAST mode refuses over 5 million enumerated inputs
+rather than exhausting disk space unexpectedly.
+
+`--fast-rate` defaults to **1000 packets/second**, configurable from 1 to
+100000; higher rates are not automatically safer or more accurate. `--fast-wait`
+defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
+or its thread count.
+
 ## Interactive menu and VPS network identity
 
-Run `realitlscanner` without arguments in a terminal to open the menu:
+Run `realitlscanner` without arguments in a terminal to open the menu (FAST mode for finite IPv4 ranges requires the optional Masscan package and network privileges):
 
 ```text
 IPv4 (исходящий): 203.0.113.10
