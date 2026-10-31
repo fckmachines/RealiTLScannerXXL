@@ -23,6 +23,7 @@ pub struct ProbeParams {
     pub ipv6: bool,
     pub reality_sni: bool,
     pub check_http: bool,
+    pub max_domain_length: usize,
     pub exclude_geo: Arc<Vec<String>>,
 }
 
@@ -41,6 +42,14 @@ pub async fn probe(
     out: async_channel::Sender<Record>,
     params: &ProbeParams,
 ) -> Outcome {
+    // Input domains can be discarded even before DNS and TCP/TLS work.
+    if host.kind == HostType::Domain
+        && filter::is_domain_too_long(&host.origin, params.max_domain_length)
+    {
+        tracing::debug!(origin = %host.origin, max = params.max_domain_length, "input domain too long");
+        return Outcome::DomainTooLong;
+    }
+
     // DNS if needed (matches Go's lazy LookupIP in ScanTLS). Uses hickory-
     // resolver so lookups are truly async and share a single query cache
     // across workers instead of hopping through the blocking-fs pool once
@@ -121,6 +130,13 @@ pub async fn probe(
                     "TLS/ALPN/certificate incompatible"
                 );
                 return Outcome::TlsIncompatible;
+            }
+
+            // Certificate length check is intentionally before the potentially
+            // slow forward DNS lookup and IP-pinned HTTPS request.
+            if filter::is_domain_too_long(&r.cn, params.max_domain_length) {
+                tracing::debug!(%ip, cn = %r.cn, max = params.max_domain_length, "certificate CN too long");
+                return Outcome::DomainTooLong;
             }
 
             let geo_code = geo.country_code(ip);
