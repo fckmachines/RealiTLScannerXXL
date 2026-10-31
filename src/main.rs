@@ -209,6 +209,7 @@ async fn main() -> Result<()> {
         ipv6: cli.ipv6,
         reality_sni: cli.reality_sni,
         check_http,
+        max_domain_length: cli.max_domain_length,
         exclude_geo: Arc::new(
             cli.exclude_geo
                 .iter()
