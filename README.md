@@ -97,6 +97,43 @@ rather than exhausting disk space unexpectedly.
 defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
 or its thread count.
 
+## Ctrl+C recovery and partial-result processing (v0.5.4)
+
+The first **Ctrl+C** in an interactive terminal **pauses** rather than
+immediately ending the scan.
+
+- **During FAST (Masscan):** already-reported `open tcp` IPv4 results are
+  captured continuously via Masscan list output to stdout with
+  `--output-flush`. Masscan stops; you can select **[1]** to run the usual
+  Rust/Tokio DEEP validation on those *already found* IPs, **[2]** to save
+  them to a recovery file, or **[0]** to exit with recovery saved. An
+  interrupted FAST with no open IPs exits without inventing candidates.
+- **During DEEP:** new probe starts stop. In-flight checks complete with
+  their normal timeout, and the current CSV writer **flushes before**
+  showing the menu. Option **[1]** resumes DEEP for the queued IPs without
+  re-running Masscan, **[2]** saves remaining IPs and exits, **[0]**
+  finishes safely and auto-saves any pending targets.
+- **Noninteractive** (cron/pipes/--domains-only): no prompts; Ctrl+C
+  checkpoints unprocessed targets if any, flushes verified CSV, reports
+  the recovery file to stderr and exits with status **130**.
+- A **second Ctrl+C** while already pausing forces prompt exit or
+  cancels DEEP in-flight tasks; completed CSV records are flushed, the
+  pending queue is saved, and the process exits with 130.
+- Recovery files are uniquely named
+  `realitlscanner-pending-<pid>-<stamp>-<n>.txt` in the output directory,
+  created with mode **0600**, without overwriting any other files.
+  Restore saved targets with `--in FILE` (DEEP-only without `--fast`).
+
+The recovery file lists unprocessed targets / Masscan discoveries, **not**
+hosts that passed TLS/DNS/HTTPS. Only accepted verified candidates appear
+in `out.csv`. Repeated new scans without recovery still obey the
+previous CSV overwrite semantics: use distinct `--out` paths to retain
+earlier sessions. Prompts are never printed on stdout with `--domains-only`.
+
+Note: this implements safe interruption rather than resumable Masscan
+packet-level progress. It does **not** automatically resume checking the
+original ASN after an interruption.
+
 ## Nine scan speed presets (v0.5.3)
 
 Interactive menu **[5] Скорость** now has nine ordered presets, a custom
