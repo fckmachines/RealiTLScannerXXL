@@ -38,16 +38,21 @@ struct ProbeOk {
 }
 
 
-fn candidate_names(cn: &str, sans: &[String], max_chars: usize) -> Vec<(String, bool)> {
+fn candidate_names(cn: &str, sans: &[String], max_chars: usize, legacy_cn: bool) -> Vec<(String, bool)> {
     let mut names=Vec::new();
     let mut seen=HashSet::new();
     for (value, via_san) in std::iter::once((cn,false))
         .chain(sans.iter().map(|s|(s.as_str(),true))) {
         let name=value.trim_end_matches('.').to_ascii_lowercase();
-        if name.is_empty() || name.starts_with("*.") ||
-            name.parse::<std::net::IpAddr>().is_ok() ||
-            !name.contains('.') || !crate::host::validate_domain(&name) ||
-            filter::is_domain_too_long(&name,max_chars) {continue;}
+        if name.is_empty() || filter::is_domain_too_long(&name,max_chars) {continue;}
+        // Preserve old DEEP-only semantics for non-REALITY scans: their
+        // CN previously needed only to be nonempty. New SAN alternatives
+        // always require a concrete DNS hostname.
+        if (via_san || !legacy_cn) &&
+            (name.starts_with("*.") || name.parse::<std::net::IpAddr>().is_ok()
+             || !name.contains('.') || !crate::host::validate_domain(&name)) {
+            continue;
+        }
         if !seen.insert(name.clone()) {continue;}
         names.push((name, via_san));
         if names.len()==8 {break;}
@@ -63,21 +68,24 @@ mod candidate_tests {
         let sans=vec!["www.example.org".into(),"legacy.test".into(),
             "*.example.org".into(),"toolong-subdomain.example.org".into(),
             "new.example.net".into()];
-        let names=candidate_names("Legacy.Test",&sans,20);
+        let names=candidate_names("Legacy.Test",&sans,20,false);
         assert_eq!(names,vec![
             ("legacy.test".into(),false),
             ("www.example.org".into(),true),
             ("new.example.net".into(),true)
         ]);
-        assert_eq!(candidate_names("", &["other.test".into()],20),
+        assert_eq!(candidate_names("", &["other.test".into()],20,false),
             vec![("other.test".into(),true)]);
-        assert!(candidate_names("",&[],20).is_empty());
+        assert!(candidate_names("",&[],20,false).is_empty());
+        assert_eq!(candidate_names("*.legacy.test",&[],20,true),
+            vec![("*.legacy.test".into(),false)]);
+        assert!(candidate_names("*.legacy.test",&[],20,false).is_empty());
     }
     #[test]
     fn huge_san_cert_capped_at_eight() {
         let many=(0..100).map(|i|format!("d{i}.example.org")).collect::<Vec<_>>();
-        assert_eq!(candidate_names("example.org",&many,20).len(),8);
-        assert!(candidate_names("long-domain.example.org",&[],20).is_empty());
+        assert_eq!(candidate_names("example.org",&many,20,false).len(),8);
+        assert!(candidate_names("long-domain.example.org",&[],20,false).is_empty());
     }
 }
 
@@ -180,7 +188,7 @@ pub async fn probe(
                 return Outcome::TlsIncompatible;
             }
             let tls_ms=tls_start.elapsed().as_millis().min(u32::MAX as u128) as u32;
-            let names=candidate_names(&r.cn,&r.san_dns,params.max_domain_length);
+            let names=candidate_names(&r.cn,&r.san_dns,params.max_domain_length,!params.reality_sni);
             if names.is_empty() {
                 if r.cn.is_empty() && r.san_dns.is_empty() {
                     return Outcome::TlsIncompatible;
