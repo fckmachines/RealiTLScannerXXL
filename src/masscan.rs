@@ -98,8 +98,10 @@ pub struct Discovery {
 }
 
 /// Run only the known executable with typed arguments, no shell. Masscan's
-/// "-oL -" writes machine-readable records to stdout. --output-flush
-/// ensures a found IP is observable immediately, even before normal exit.
+/// "-oL -" writes machine-readable records to stdout. Debian 13's
+/// Masscan 1.3.2 does NOT accept the upstream --output-flush switch:
+/// passing it makes Masscan parse "-oL" as its value and fail before
+/// sending any packets. On Ctrl+C only already-flushed lines are recoverable.
 pub async fn discover(workspace: &Workspace, port: u16, rate: u32, wait: u32) -> Result<Discovery> {
     discover_with(Path::new("masscan"), workspace, port, rate, wait).await
 }
@@ -116,7 +118,8 @@ async fn discover_with(
        .arg("-p").arg(port.to_string())
        .arg("--rate").arg(rate.to_string())
        .arg("--wait").arg(wait.to_string())
-       .arg("--output-flush")
+       // The Debian 13 package does not support "--output-flush".
+       // Do not add it back without validating with REAL masscan in CI.
        .arg("-oL").arg("-")
        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
        .kill_on_drop(true);
@@ -156,8 +159,8 @@ async fn discover_with(
                 signal.context("Не удалось получить Ctrl+C")?;
                 interrupted = true;
                 eprintln!("[FAST] Ctrl+C: прекращаем отправку SYN, собираем полученные ответы...");
-                // Terminate sender immediately. Masscan's per-result flush
-                // ensures already reported lines are still in the pipe.
+                // Terminate sender immediately. Only already-flushed list
+                // output is recoverable; this may be incomplete on SIGKILL.
                 child.start_kill().context("Не удалось остановить Masscan")?;
                 // Drain pending pipe output after child termination, with a bound.
                 match tokio::time::timeout(Duration::from_secs(3), async {
