@@ -134,6 +134,35 @@ Note: this implements safe interruption rather than resumable Masscan
 packet-level progress. It does **not** automatically resume checking the
 original ASN after an interruption.
 
+## v0.5.6 — Masscan compatibility fix for Debian 13
+
+Fixed a FAST SCAN startup failure with the Debian 13 Masscan 1.3.2 package:
+
+```text
+CONF: unknown config option: output-flush=-oL
+```
+
+Masscan in this Debian package does not accept the
+`--output-flush` argument. RealiTLScannerXXL now uses the supported
+`-oL -` output option without that switch. The rejected invocation
+previously failed *before* SYN scanning began; it was not a rate issue.
+
+The CI release gate now installs the actual Masscan package and passes
+the scanner's **exact constructed argv** to it with `--echo`, validating
+argument parsing **without any network transmission**, alongside the
+existing simulated FAST→DEEP and interruption tests.
+
+**Ctrl+C limitation:** without the unsupported flush option, a forcibly
+terminated Masscan process can retain unflushed output in its userspace
+buffer. RealiTLScannerXXL still saves any lines that reached its stdout
+pipe, but partial FAST discoveries on interruption are best-effort, not a
+guarantee of recovering every open port seen by Masscan.
+
+```bash
+bash install.sh --update
+realitlscanner --version
+```
+
 ## v0.5.5 — FAST and DEEP progress indicators
 
 When stderr is attached to a terminal, both scanning phases print progress

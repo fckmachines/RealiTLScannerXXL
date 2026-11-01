@@ -62,7 +62,6 @@ jobs:
               -oL) output="$2"; shift 2 ;;
               -p) port="$2"; shift 2 ;;
               --rate|--wait) shift 2 ;;
-              --output-flush) shift ;;
               *) echo "Unexpected masscan arg: $1" >&2; exit 2 ;;
             esac
           done
@@ -137,6 +136,49 @@ jobs:
           grep -Fxq 'IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE' "$temp/deep.csv"
           grep -Fq 'Осталось непроверенных целей' "$temp/deep.stderr"
           grep -l '127.0.0.' "$temp"/realitlscanner-pending-*.txt
+
+      - name: Verify real Masscan CLI parser without sending packets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The old fake executable accepted --output-flush, but actual
+          # packaged Masscan 1.3.x fails on that flag. Run the *real* parser.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq masscan
+          # Masscan 1.3.2 prints the version but returns status 1 for -V.
+          # This is not an argument validation error.
+          masscan -V || true
+          temp="$(mktemp -d)"
+          trap 'rm -rf "$temp"' EXIT
+          # Wrapper appends --echo to the exact argv assembled by the Rust
+          # binary. This asks real Masscan to validate and echo config,
+          # without initializing any SYN scan or transmitting packets.
+          cat > "$temp/masscan" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec /usr/bin/masscan "$@" --echo
+          EOF
+          chmod +x "$temp/masscan"
+          if ! PATH="$temp:$PATH" ./target/release/realitlscanner \
+            --addr 192.0.2.1/32 --fast --fast-rate 100 --fast-wait 1 \
+            --thread 1 --timeout 1 --no-network-info \
+            --out "$temp/verified.csv" >"$temp/stdout" 2>"$temp/stderr"; then
+            echo "Real Masscan argument check failed:" >&2
+            cat "$temp/stderr" >&2
+            cat "$temp/stdout" >&2
+            exit 1
+          fi
+          # Emit diagnostic details on every failure; the temporary files
+          # are removed by trap and are otherwise invisible in CI logs.
+          if ! grep -Fq '[FAST] Готово: 0 уникальных IP' "$temp/stderr" \
+             || ! grep -Fxq 'IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE' "$temp/verified.csv" \
+             || grep -Fq 'unknown config option' "$temp/stderr"; then
+            echo "Masscan parser returned unexpected output:" >&2
+            cat "$temp/stderr" >&2
+            cat "$temp/stdout" >&2
+            if [[ -f "$temp/verified.csv" ]]; then cat "$temp/verified.csv" >&2; fi
+            exit 1
+          fi
 
       - name: Publish release when version is new
         if: github.event_name != 'pull_request'
