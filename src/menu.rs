@@ -1,7 +1,7 @@
 //! Interactive entry point. Does not affect CLI scripted invocations.
 use crate::cli::Cli;
 use crate::network::{self, Identity, ScanPlan};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
@@ -81,6 +81,63 @@ fn choose_speed(current: ScanSpeed) -> Result<ScanSpeed> {
             Ok(current)
         }
     }
+}
+
+/// Actions after a *first* Ctrl+C. A second signal while prompting
+/// returns Forced, which the caller checkpoints before process exit.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PauseAction { Continue, Save, Exit, Forced }
+
+fn parse_pause_choice(choice: &str, has_pending: bool, default: PauseAction) -> PauseAction {
+    match choice.trim() {
+        "" => default,
+        "1" if has_pending => PauseAction::Continue,
+        "2" => PauseAction::Save,
+        _ => PauseAction::Exit,
+    }
+}
+
+async fn prompt_pause(has_pending: bool, default: PauseAction) -> Result<PauseAction> {
+    // Reading from a terminal is blocking. Use a separate thread so that a
+    // second Ctrl+C can still be observed by the Tokio signal handler.
+    let handle = tokio::task::spawn_blocking(move || prompt("   Choice: "));
+    tokio::select! {
+        line = handle => {
+            let answer = line.context("Ошибка чтения выбора")??;
+            Ok(parse_pause_choice(answer.as_deref().unwrap_or("0"), has_pending, default))
+        },
+        _ = tokio::signal::ctrl_c() => {
+            eprintln!("   Second Ctrl+C: сохраняем найденное и завершаем.");
+            Ok(PauseAction::Forced)
+        }
+    }
+}
+
+pub async fn pause_fast(found: usize) -> Result<PauseAction> {
+    eprintln!("\nFAST SCAN paused (Ctrl+C): найдено {found} IP с TCP/443.");
+    if found == 0 {
+        eprintln!("   Нет найденных IP для DEEP-проверки.");
+        return Ok(PauseAction::Exit);
+    }
+    eprintln!("   [1] DEEP SCAN — проверить найденные {found} IP");
+    eprintln!("   [2] Сохранить IP в отдельный файл и выйти");
+    eprintln!("   [0] Завершить, сохранив найденные IP");
+    eprintln!("   Выбор по умолчанию: [1]");
+    prompt_pause(true, PauseAction::Continue).await
+}
+
+pub async fn pause_deep(checked: u64, accepted: u64, remaining: usize) -> Result<PauseAction> {
+    eprintln!("\nDEEP SCAN paused (Ctrl+C).");
+    eprintln!("   Проверено: {checked} | кандидатов: {accepted} | осталось: {remaining}");
+    if remaining == 0 {
+        eprintln!("   Все оставшиеся цели уже обработаны.");
+        return Ok(PauseAction::Exit);
+    }
+    eprintln!("   [1] Продолжить DEEP для {remaining} оставшихся целей");
+    eprintln!("   [2] Сохранить оставшиеся цели в файл и выйти");
+    eprintln!("   [0] Завершить и сохранить оставшиеся цели");
+    eprintln!("   Выбор по умолчанию: [0]");
+    prompt_pause(true, PauseAction::Exit).await
 }
 
 fn prompt(message: &str) -> Result<Option<String>> {
@@ -326,6 +383,14 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pause_choices_are_safe() {
+        assert_eq!(parse_pause_choice("1", true, PauseAction::Exit), PauseAction::Continue);
+        assert_eq!(parse_pause_choice("1", false, PauseAction::Exit), PauseAction::Exit);
+        assert_eq!(parse_pause_choice("", true, PauseAction::Continue), PauseAction::Continue);
+        assert_eq!(parse_pause_choice("2", true, PauseAction::Exit), PauseAction::Save);
+        assert_eq!(parse_pause_choice("0", true, PauseAction::Continue), PauseAction::Exit);
+    }
     #[test]
     fn all_menu_borders_have_same_column_width() {
         for width in [24,32,48,60,68] {
