@@ -87,15 +87,18 @@ fn parse_open(line: &str, expected_port: u16) -> Option<Ipv4Addr> {
     parts[3].parse::<Ipv4Addr>().ok()
 }
 
-/// Run only the known Masscan executable and strict, typed arguments.
-/// Never run via a shell, never accept user-generated extra flags.
-pub async fn discover(workspace: &Workspace, port: u16, rate: u32, wait: u32) -> Result<Vec<Ipv4Addr>> {
+pub struct Discovery {
+    pub addresses: Vec<Ipv4Addr>,
+    pub interrupted: bool,
+}
+
+pub async fn discover(workspace: &Workspace, port: u16, rate: u32, wait: u32) -> Result<Discovery> {
     discover_with(Path::new("masscan"), workspace, port, rate, wait).await
 }
 
 async fn discover_with(
     executable: &Path, workspace: &Workspace, port: u16, rate: u32, wait: u32
-) -> Result<Vec<Ipv4Addr>> {
+) -> Result<Discovery> {
     if rate == 0 || rate > 100_000 { bail!("FAST SCAN: скорость должна быть 1..100000 пакетов/с"); }
     if wait == 0 || wait > 60 { bail!("FAST SCAN: ожидание ответов должно быть 1..60 секунд"); }
 
@@ -108,26 +111,63 @@ async fn discover_with(
        .arg("-oL").arg(workspace.output())
        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit())
        .kill_on_drop(true);
-
-    let status = cmd.status().await.context(
-        "Masscan не запускается. Debian 13: sudo apt install masscan. Для SYN-сканирования нужны сетевые привилегии (например, запуск от root)."
+    let mut child = cmd.spawn().context(
+        "Masscan не запускается. Debian 13: sudo apt install masscan. Для SYN-сканирования нужны права root/CAP_NET_RAW."
     )?;
-    if !status.success() {
-        bail!("Masscan завершился с ошибкой ({status}). Проверьте права CAP_NET_RAW/root, сетевой интерфейс, firewall и ограничения VPS.");
-    }
-    let file = tokio::fs::File::open(workspace.output()).await
-        .context("Masscan не создал файл результатов")?;
-    let mut lines = BufReader::new(file).lines();
-    let mut found = HashSet::new();
-    while let Some(line) = lines.next_line().await? {
-        if let Some(ip) = parse_open(&line, port) {
-            found.insert(ip);
+    let started = std::time::Instant::now();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+    tick.tick().await;
+    let mut interrupted = false;
+    let status = loop {
+        tokio::select! {
+            result = child.wait() => { break result.context("Ошибка ожидания Masscan")?; }
+            _ = tokio::signal::ctrl_c() => {
+                interrupted = true;
+                eprintln!("[FAST] Ctrl+C: останавливаем Masscan и сохраняем найденные IP...");
+                // SIGINT lets Masscan flush its -oL output. No shell involved.
+                if let Some(pid) = child.id() {
+                    let status = Command::new("kill").arg("-INT").arg(pid.to_string())
+                        .status().await;
+                    if !matches!(status, Ok(status) if status.success()) {
+                        let _ = child.start_kill();
+                    }
+                }
+                break match tokio::time::timeout(
+                    std::time::Duration::from_secs(3), child.wait()
+                ).await {
+                    Ok(result) => result.context("Ошибка остановки Masscan")?,
+                    Err(_) => { child.kill().await.context("Masscan не завершился")?; child.wait().await? }
+                };
+            }
+            _ = tick.tick() => {
+                // The send count is only inferred from configured PPS.
+                // The scanner's actual send count is not exposed by -oL.
+                let estimated = ((started.elapsed().as_secs_f64() * rate as f64) as u64)
+                    .min(workspace.targets);
+                eprintln!("{} [оценка отправленных SYN; не фактический счётчик]",
+                    crate::progress::line("FAST", estimated, Some(workspace.targets), started.elapsed()));
+            }
         }
+    };
+    if !status.success() && !interrupted {
+        bail!("Masscan завершился с ошибкой ({status}). Проверьте права root/CAP_NET_RAW, firewall и ограничения VPS.");
+    }
+    let mut found = HashSet::new();
+    match tokio::fs::File::open(workspace.output()).await {
+        Ok(file) => {
+            let mut lines = BufReader::new(file).lines();
+            while let Some(line) = lines.next_line().await? {
+                if let Some(ip) = parse_open(&line, port) { found.insert(ip); }
+            }
+        }
+        Err(err) if interrupted && err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).context("Masscan не создал файл результатов"),
     }
     let mut addresses: Vec<_> = found.into_iter().collect();
     addresses.sort_unstable();
-    eprintln!("[FAST] Готово: найдено {} IP с TCP/{port}; передаём в DEEP SCAN.",addresses.len());
-    Ok(addresses)
+    eprintln!("[FAST] {}: найдено {} IP с TCP/{port}.",
+        if interrupted { "Прерван" } else { "Готово" }, addresses.len());
+    Ok(Discovery { addresses, interrupted })
 }
 
 #[cfg(test)]
