@@ -1,3 +1,114 @@
+# Next release — v0.5.4 (PLANNED, NOT IMPLEMENTED)
+
+## Feature: graceful Ctrl+C with processing of partial scan results
+
+**User request (2026-11-01):** Ctrl+C during scanning should **not immediately
+exit**. Pause discovery or processing and offer to handle everything already
+collected. This must work whether the signal arrives in Masscan FAST discovery
+or the Rust/Tokio DEEP stage.
+
+### Interaction: FAST scan interrupted
+
+- First Ctrl+C means **stop sending new SYN probes** and finish collecting
+  already-arrived results within a short bounded shutdown period.
+- Safely stop and reap the Masscan child; do not lose the open TCP/443 IPs it
+  has already reported. Replace the current all-or-nothing flow (Masscan runs
+  to completion before its file is parsed) with incremental, durable parsing
+  or a flushed on-disk journal. A partially written final line must be ignored,
+  not counted as an IP. Never assume Masscan finishes normally after SIGINT.
+- Deduplicate captured IPv4 addresses and show their exact count.
+- In an interactive terminal, print a summary and offer:
+
+```text
+FAST SCAN paused (Ctrl+C).
+Checked/attempted: <count, if reliably available>
+TCP/443 open captured: <N> unique IPv4
+
+[1] DEEP SCAN — verify the <N> IPs already found
+[2] Save these IPs to a separate .txt file and exit
+[0] Exit, preserving all completed results
+Choice [1]:
+```
+
+Option [1] hands **only the collected IPs** to the existing TLS/DNS/HTTPS
+workers; it must never restart FAST or continue probing unvisited targets.
+Option [2] creates an explicit, reusable IP-only file, safely named without
+overwriting an existing result. Option [0] exits cleanly and retains already
+completed output; do not silently discard captured open-IP results—save the
+recoverable list automatically if nonempty and tell the user its path.
+If there are no captured open IPs, show that clearly and offer safe exit.
+
+### Interaction: DEEP scan interrupted
+
+- First Ctrl+C stops scheduling **new** TLS/HTTPS probes. Do not abort
+  already-running probes; let them finish under their configured timeouts
+  and **flush** the output writer to disk before presenting the menu.
+- Clearly distinguish *already verified* accepted domains, *rejected*
+  targets, and *unprocessed IPs found by FAST*.
+- Present choices:
+
+```text
+DEEP SCAN paused (Ctrl+C).
+Finished DEEP: <N>
+Accepted candidates: <N>
+Remaining collected IPs: <N>
+
+[1] Continue DEEP on the remaining collected IPs (no new FAST)
+[2] Save remaining IPs to .txt and finish
+[0] Finish now, keeping verified CSV and saving unprocessed IPs
+Choice [0]:
+```
+
+Ensure that in-flight results and final counts stay correct; any outstanding
+IP targets must be recoverable and never falsely labelled "verified".
+Do not truncate existing `out.csv` on interruption. When continuing,
+preserve the same deduplication, domain-length cap, speed profile, and filter
+settings from the original run.
+
+### CLI/batch behavior and signals
+
+- Ask only when stdin and stderr/stdout are attached to an **interactive TTY**.
+  For pipes, cron and `--domains-only` batch workflows, **never block**:
+  stop new work, finish bounded in-flight work, flush existing CSV/stdout,
+  checkpoint unprocessed IPs when possible, report status on stderr,
+  and return interrupt exit status 130.
+- Keep `--domains-only` stdout exclusively for domain names, including
+  interrupted runs; prompts and progress go to stderr/TTY.
+- A *second* Ctrl+C during shutdown or the prompt should trigger a fast but
+  still safe exit with a bounded flush/checkpoint, never an infinite wait.
+  Errors from Masscan stop/reap, disk writes, or stdin EOF must be surfaced,
+  not reported as a successful complete scan.
+- Use a single well-defined cancellation coordinator for FAST, producer,
+  DEEP worker queues, file writers and subprocesses; avoid orphaned Masscan
+  processes and data races. Respect the existing 5M FAST target cap.
+- Only save recovered IPs and verified results, **not** arbitrary scanned
+  destinations or private workspaces to a world-readable file; preserve
+  restrictive file permissions and warn about files containing target IPs.
+
+### Acceptance and release gate
+
+1. Ctrl+C during a partially completed FAST scan offers DEEP processing of
+   captured open IPs, without continuing FAST; pending list is recoverable.
+2. Ctrl+C during DEEP does not lose already accepted CSV rows or mistake
+   queued IPs for checked results; user may continue, save, or exit.
+3. First interruption does not immediately terminate an interactive scan.
+   Zero-candidate, back-to-back signal, EOF and non-TTY runs behave safely.
+4. Original `out.csv` content is not unexpectedly overwritten; completed
+   result files are always flushed on clean interrupt.
+5. Add deterministic integration tests using a simulated streaming Masscan
+   process and synthetic TLS/DEEP results (no Internet probing in CI).
+6. No regression in normal completion, FAST→DEEP performance/rate limits,
+   ASN preflight, `--max-domain-length`, `--domains-only`, or installer.
+7. Document operator-facing prompts, batch exit codes and recovery file paths.
+8. Publish Linux AMD64 v0.5.4 **only after** Rust tests, release build, and
+   interruption smoke tests pass in GitHub Actions.
+
+**Current status:** planning only. No Ctrl+C behavior has been changed.
+
+---
+
+## Earlier released plan (historical record)
+
 # Release v0.4.1 — shipped (2026-10-31)
 
 Both fixes were implemented and published in v0.4.1. This file retains the acceptance plan as a release record. See [v0.4.1](https://github.com/fckmachines/RealiTLScannerXXL/releases/tag/v0.4.1) and [PR #4](https://github.com/fckmachines/RealiTLScannerXXL/pull/4).
