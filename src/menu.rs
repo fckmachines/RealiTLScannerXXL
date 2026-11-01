@@ -1,7 +1,7 @@
 //! Interactive entry point. Does not affect CLI scripted invocations.
 use crate::cli::Cli;
 use crate::network::{self, Identity, ScanPlan};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::process::{Command, Stdio};
