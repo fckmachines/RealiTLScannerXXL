@@ -40,13 +40,17 @@ pub struct Cli {
     #[arg(long, conflicts_with = "url")]
     pub fast: bool,
 
-    /// Masscan maximum packet rate (packets/second)
-    #[arg(long, default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..=100000))]
+    /// Masscan maximum packet rate (packets/second); set conservatively for VPS
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=100000))]
     pub fast_rate: u32,
 
     /// Seconds to wait for SYN responses after Masscan finishes sending
     #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=60))]
     pub fast_wait: u32,
+
+    /// Global rate limit for STARTING DEEP TCP/TLS probes, per second
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    pub deep_rate: u32,
 
     /// Concurrent probe tasks
     #[arg(long, default_value_t = 32)]
@@ -60,7 +64,7 @@ pub struct Cli {
     pub timeout: u64,
 
     /// Maximum certificate domain (CN) length in Unicode characters; 0 disables the filter
-    #[arg(long, default_value_t = 40, value_name = "CHARS")]
+    #[arg(long, default_value_t = 20, value_name = "CHARS")]
     pub max_domain_length: usize,
 
     #[arg(short, long, default_value_t = false)]
@@ -172,9 +176,22 @@ mod tests {
     }
 
     #[test]
+    fn deep_rate_is_bounded_and_configurable() {
+        let x = Cli::try_parse_from([
+            "x", "--addr", "192.0.2.1/32", "--deep-rate", "7",
+        ]).unwrap();
+        assert_eq!(x.deep_rate, 7);
+        for invalid in ["0", "1001", "garbage"] {
+            assert!(Cli::try_parse_from([
+                "x", "--addr", "192.0.2.1/32", "--deep-rate", invalid,
+            ]).is_err());
+        }
+    }
+
+    #[test]
     fn domain_length_limit_parsing() {
         let default = Cli::try_parse_from(["x", "--addr", "192.0.2.0/32"]).unwrap();
-        assert_eq!(default.max_domain_length, 40);
+        assert_eq!(default.max_domain_length, 20);
         let custom = Cli::try_parse_from([
             "x", "--addr", "192.0.2.0/32", "--max-domain-length", "24",
         ]).unwrap();
@@ -200,9 +217,10 @@ mod tests {
         assert_eq!(cli.port, 443);
         assert_eq!(cli.thread, 32);
         assert_eq!(cli.timeout, 10);
-        assert_eq!(cli.max_domain_length, 40);
+        assert_eq!(cli.max_domain_length, 20);
         assert!(!cli.fast);
-        assert_eq!(cli.fast_rate, 1000);
+        assert_eq!(cli.fast_rate, 100);
+        assert_eq!(cli.deep_rate, 10);
         assert_eq!(cli.fast_wait, 5);
         assert_eq!(cli.out, "out.csv");
         assert_eq!(cli.mmdb, PathBuf::from("Country.mmdb"));
