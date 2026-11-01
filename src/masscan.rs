@@ -11,6 +11,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use std::time::Duration;
 use tokio::process::Command;
 
 pub const MAX_FAST_TARGETS: u64 = 5_000_000;
@@ -87,15 +88,24 @@ fn parse_open(line: &str, expected_port: u16) -> Option<Ipv4Addr> {
     parts[3].parse::<Ipv4Addr>().ok()
 }
 
-/// Run only the known Masscan executable and strict, typed arguments.
-/// Never run via a shell, never accept user-generated extra flags.
-pub async fn discover(workspace: &Workspace, port: u16, rate: u32, wait: u32) -> Result<Vec<Ipv4Addr>> {
+/// Captures live Masscan reports rather than waiting for a completed output
+/// file: on interruption, reported IPs remain available for DEEP/recovery.
+#[derive(Debug)]
+pub struct Discovery {
+    pub addresses: Vec<Ipv4Addr>,
+    pub interrupted: bool,
+}
+
+/// Run only the known executable with typed arguments, no shell. Masscan's
+/// "-oL -" writes machine-readable records to stdout. --output-flush
+/// ensures a found IP is observable immediately, even before normal exit.
+pub async fn discover(workspace: &Workspace, port: u16, rate: u32, wait: u32) -> Result<Discovery> {
     discover_with(Path::new("masscan"), workspace, port, rate, wait).await
 }
 
 async fn discover_with(
     executable: &Path, workspace: &Workspace, port: u16, rate: u32, wait: u32
-) -> Result<Vec<Ipv4Addr>> {
+) -> Result<Discovery> {
     if rate == 0 || rate > 100_000 { bail!("FAST SCAN: скорость должна быть 1..100000 пакетов/с"); }
     if wait == 0 || wait > 60 { bail!("FAST SCAN: ожидание ответов должно быть 1..60 секунд"); }
 
@@ -105,29 +115,63 @@ async fn discover_with(
        .arg("-p").arg(port.to_string())
        .arg("--rate").arg(rate.to_string())
        .arg("--wait").arg(wait.to_string())
-       .arg("-oL").arg(workspace.output())
-       .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit())
+       .arg("--output-flush")
+       .arg("-oL").arg("-")
+       .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit())
        .kill_on_drop(true);
 
-    let status = cmd.status().await.context(
+    let mut child = cmd.spawn().context(
         "Masscan не запускается. Debian 13: sudo apt install masscan. Для SYN-сканирования нужны сетевые привилегии (например, запуск от root)."
     )?;
-    if !status.success() {
-        bail!("Masscan завершился с ошибкой ({status}). Проверьте права CAP_NET_RAW/root, сетевой интерфейс, firewall и ограничения VPS.");
-    }
-    let file = tokio::fs::File::open(workspace.output()).await
-        .context("Masscan не создал файл результатов")?;
-    let mut lines = BufReader::new(file).lines();
+    let stdout = child.stdout.take().context("Нет stdout Masscan")?;
+    let mut lines = BufReader::new(stdout).lines();
     let mut found = HashSet::new();
-    while let Some(line) = lines.next_line().await? {
-        if let Some(ip) = parse_open(&line, port) {
-            found.insert(ip);
+    let mut interrupted = false;
+    loop {
+        tokio::select! {
+            line = lines.next_line() => match line.context("Ошибка чтения stdout Masscan")? {
+                Some(line) => {
+                    if let Some(ip) = parse_open(&line, port) { found.insert(ip); }
+                },
+                None => break,
+            },
+            signal = tokio::signal::ctrl_c() => {
+                signal.context("Не удалось получить Ctrl+C")?;
+                interrupted = true;
+                eprintln!("[FAST] Ctrl+C: прекращаем отправку SYN, собираем полученные ответы...");
+                // Terminate sender immediately. Masscan's per-result flush
+                // ensures already reported lines are still in the pipe.
+                child.start_kill().context("Не удалось остановить Masscan")?;
+                // Drain pending pipe output after child termination, with a bound.
+                match tokio::time::timeout(Duration::from_secs(3), async {
+                    while let Some(line) = lines.next_line().await? {
+                        if let Some(ip) = parse_open(&line, port) { found.insert(ip); }
+                    }
+                    Ok::<_, std::io::Error>(())
+                }).await {
+                    Ok(done) => done.context("Ошибка чтения частичных результатов Masscan")?,
+                    Err(_) => eprintln!("[FAST] Истёк срок сбора результатов; используем уже полученные IP."),
+                }
+                break;
+            }
         }
+    }
+    // Reap child (no zombie); bounded if interrupted. Natural nonzero exit
+    // is a real error, never mistaken for a valid empty discovery.
+    let status = if interrupted {
+        tokio::time::timeout(Duration::from_secs(3), child.wait()).await
+            .context("Masscan не завершился после остановки")??
+    } else {
+        child.wait().await.context("Ожидание Masscan завершилось ошибкой")?
+    };
+    if !interrupted && !status.success() {
+        bail!("Masscan завершился с ошибкой ({status}). Проверьте права CAP_NET_RAW/root, интерфейс, firewall и ограничения VPS.");
     }
     let mut addresses: Vec<_> = found.into_iter().collect();
     addresses.sort_unstable();
-    eprintln!("[FAST] Готово: найдено {} IP с TCP/{port}; передаём в DEEP SCAN.",addresses.len());
-    Ok(addresses)
+    eprintln!("[FAST] {}: {} уникальных IP с TCP/{port}.",
+        if interrupted { "Прервано" } else { "Готово" }, addresses.len());
+    Ok(Discovery { addresses, interrupted })
 }
 
 #[cfg(test)]
