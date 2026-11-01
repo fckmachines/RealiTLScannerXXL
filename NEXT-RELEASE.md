@@ -1,11 +1,12 @@
-# Next release — v0.6.1 (PLANNED; no code changes)
+# Release v0.6.1 — shipped (2026-11-01)
 
 ## Compact scan metadata and transparent scoring in offline HTML
 
-Requested 2026-11-01. Scope is **HTML presentation only**. No additional
-mandatory eligibility filters, packet-rate modifications, changes to FAST/DEEP,
-Ctrl+C handling, result filenames, SAN processing, CLI flags or existing CSV
-schema. Do not implement until explicitly authorized.
+Implemented in PR #14 and published after successful AMD64 test/build/CI:
+https://github.com/fckmachines/RealiTLScannerXXL/releases/tag/v0.6.1.
+Scope is **HTML presentation only**. No additional mandatory eligibility
+filters, packet-rate modifications, changes to FAST/DEEP, Ctrl+C handling,
+result filenames, SAN processing, CLI flags or existing CSV schema.
 
 ### Above results: compact 1–2-line scan summary
 
