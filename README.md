@@ -97,6 +97,66 @@ rather than exhausting disk space unexpectedly.
 defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
 or its thread count.
 
+## v0.5.4 — progress and Ctrl+C recovery
+
+**Progress** is printed to stderr every two seconds when stderr is a terminal:
+
+```text
+[FAST] 2500/4096 (61.0%) | осталось: 1596 | 98.5 IP/с | ETA: 0m 17s
+[DEEP] 68/213 (31.9%) | осталось: 145 | 8.0 IP/с | ETA: 0m 19s
+```
+
+FAST progress is **only a rate-based estimate of SYNs sent**: Masscan's
+`-oL` output provides *open ports*, not a reliable transmitted-packet count.
+The estimate can diverge from real packet transmission, especially during
+network throttling, final receive wait, or a paused scan; it is labelled
+accordingly. DEEP progress uses **actual completed probes**. For finite
+ASN scans and IP/CIDRs, the total is known; for streaming input files,
+URLs and the legacy infinite neighbor-walk mode, the total and ETA are
+shown as unknown until a finite queue is available.
+
+**Ctrl+C** during FAST sends SIGINT to Masscan, lets it finish/flush
+(with a bounded 3-second grace period), parses the valid unique `open tcp`
+addresses already written, and offers to process these addresses via DEEP
+or export the partial IP list. Stopping FAST does **not** resume SYN probes.
+The output is best-effort: any in-flight reply or buffered line not committed
+by Masscan before it exits cannot be recovered.
+
+**Ctrl+C** during DEEP stops dispatching new probes and waits for in-flight
+probes under their configured timeouts. Verified CSV results are flushed
+before showing an interactive menu:
+
+```text
+DEEP SCAN paused (Ctrl+C)
+DEEP завершено: 120 | принято: 6 | осталось: 48
+[1] Продолжить DEEP на оставшихся IP
+[2] Сохранить оставшиеся IP в файл и выйти
+[0] Завершить с сохранением проверенных и непроверенных
+Choice [0]:
+```
+
+Continuing **does not run Masscan again**. New verified candidates append
+to the existing CSV without repeating its header or destroying already
+verified rows. Only addresses already queued at the time of cancellation
+can resume: for stream sources, source generation stops and unreached
+CIDR/ASN addresses are *not* claimed as verified or queued.
+
+Exiting with unprocessed targets automatically writes a unique
+`<output>.pending-<id>.txt` file in the output directory, with Unix
+permissions `0600` and create-new semantics (never replaces a previous
+file). Use `--in PATH` for subsequent runs (without `--fast` if
+this file contains hostnames). Without pending targets no file is created.
+
+Interactive prompts require stdin/stderr TTY. In batch/pipe mode the
+scanner never prompts: it checkpoints already queued targets, flushes output,
+and exits with status **130** after a Ctrl+C. `--domains-only` keeps
+stdout exclusively for domains; progress and interruption notices use
+stderr. A second Ctrl+C during shutdown forces active workers to stop
+and then flushes output; during the prompt it exits with 130.
+
+These mechanisms do not turn partial results into an exhaustive ASN scan.
+Use only authorized ranges and respect the hosting provider's AUP.
+
 ## Nine scan speed presets (v0.5.3)
 
 Interactive menu **[5] Скорость** now has nine ordered presets, a custom
