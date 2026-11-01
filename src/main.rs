@@ -325,7 +325,7 @@ async fn main() -> Result<()> {
             };
             if action != menu::PauseAction::Continue {
                 let pending: Vec<Host> = discovery.addresses.into_iter().map(host_from_ip).collect();
-                save_recovery(&pending, if csv_path.is_empty() {&cli.out} else {&csv_path})?;
+                save_recovery(&pending, &cli.out)?;
                 if !interactive_recovery(&cli) || action == menu::PauseAction::Forced {
                     std::process::exit(130);
                 }
