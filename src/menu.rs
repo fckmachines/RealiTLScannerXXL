@@ -26,30 +26,60 @@ impl ScanSpeed {
 fn valid_rate(text: &str, max: u32) -> Option<u32> {
     text.trim().parse::<u32>().ok().filter(|v| *v >= 1 && *v <= max)
 }
+/// Ordered from lightest to heaviest. These are throughput ceilings,
+/// not guarantees of permission or of a fixed total packet rate.
+const SPEED_PRESETS: [(&str, ScanSpeed); 9] = [
+    ("Минимальная", ScanSpeed { syn_pps: 5, deep_per_sec: 1 }),
+    ("Очень тихая", ScanSpeed { syn_pps: 10, deep_per_sec: 1 }),
+    ("Тихая", ScanSpeed { syn_pps: 25, deep_per_sec: 2 }),
+    ("Осторожная", ScanSpeed { syn_pps: 50, deep_per_sec: 5 }),
+    ("Стандартная", ScanSpeed { syn_pps: 100, deep_per_sec: 10 }),
+    ("Умеренно быстрая", ScanSpeed { syn_pps: 250, deep_per_sec: 20 }),
+    ("Быстрая", ScanSpeed { syn_pps: 500, deep_per_sec: 40 }),
+    ("Высокая", ScanSpeed { syn_pps: 1000, deep_per_sec: 80 }),
+    ("Очень высокая", ScanSpeed { syn_pps: 2000, deep_per_sec: 100 }),
+];
+
+fn speed_preset(choice: &str) -> Option<ScanSpeed> {
+    let index = choice.parse::<usize>().ok()?.checked_sub(1)?;
+    SPEED_PRESETS.get(index).map(|(_, speed)| *speed)
+}
+
 fn choose_speed(current: ScanSpeed) -> Result<ScanSpeed> {
-    println!("   Скорость: {} SYN/с; {} DEEP/с", current.syn_pps, current.deep_per_sec);
-    println!("   [1] Тихий режим: 25 SYN/с, 2 DEEP/с");
-    println!("   [2] Стандартный: 100 SYN/с, 10 DEEP/с");
-    println!("   [3] Быстрее: 250 SYN/с, 20 DEEP/с");
-    println!("   [4] Ввести скорости вручную");
+    println!("   Текущая скорость: {} SYN/с; {} DEEP/с", current.syn_pps, current.deep_per_sec);
+    for (index, (name, speed)) in SPEED_PRESETS.iter().enumerate() {
+        let selected = if *speed == current { " (текущая)" } else { "" };
+        println!("   [{}] {:<18} {:>5} SYN/с | {:>3} DEEP/с{}",
+            index + 1, name, speed.syn_pps, speed.deep_per_sec, selected);
+    }
+    println!("   [10] Свои значения");
     println!("   [0] Назад");
-    let Some(choice) = prompt("   Выбор: ")? else {return Ok(current)};
+    println!("   Примечание: высокие скорости — только для разрешённых диапазонов;");
+    println!("   ограничения хостера действуют независимо от выбранного профиля.");
+    let Some(choice) = prompt("   Выбор: ")? else { return Ok(current) };
+    if let Some(speed) = speed_preset(&choice) {
+        return Ok(speed);
+    }
     match choice.as_str() {
-        "1" => Ok(ScanSpeed {syn_pps:25,deep_per_sec:2}),
-        "2" => Ok(ScanSpeed::default()),
-        "3" => Ok(ScanSpeed {syn_pps:250,deep_per_sec:20}),
-        "4" => {
+        "10" => {
             let Some(a) = prompt("   FAST SYN пакетов/с [1..100000]: ")?
-                else {return Ok(current)};
+                else { return Ok(current) };
             let Some(b) = prompt("   DEEP новых проверок/с [1..1000]: ")?
-                else {return Ok(current)};
-            match (valid_rate(&a,100_000), valid_rate(&b,1_000)) {
-                (Some(syn_pps),Some(deep_per_sec)) => Ok(ScanSpeed{syn_pps,deep_per_sec}),
-                _ => {eprintln!("   Некорректная скорость; настройки не изменены."); Ok(current)}
+                else { return Ok(current) };
+            match (valid_rate(&a, 100_000), valid_rate(&b, 1_000)) {
+                (Some(syn_pps), Some(deep_per_sec)) =>
+                    Ok(ScanSpeed { syn_pps, deep_per_sec }),
+                _ => {
+                    eprintln!("   Некорректная скорость; настройки не изменены.");
+                    Ok(current)
+                }
             }
         }
         "0" => Ok(current),
-        _ => {eprintln!("   Неизвестный пункт.");Ok(current)}
+        _ => {
+            eprintln!("   Неизвестный пункт.");
+            Ok(current)
+        }
     }
 }
 
@@ -345,5 +375,29 @@ mod tests {
         assert_eq!(custom.fast_rate,25);
         assert_eq!(custom.deep_rate,2);
         assert!(render_menu(68,20,ScanSpeed::default()).contains("[5] Скорость: 100 SYN/с"));
+    }
+    #[test]
+    fn nine_speed_presets_are_ordered_and_compatible_with_cli() {
+        assert_eq!(SPEED_PRESETS.len(), 9);
+        let mut last = ScanSpeed { syn_pps: 0, deep_per_sec: 0 };
+        for (i, (_, expected)) in SPEED_PRESETS.iter().enumerate() {
+            let actual = speed_preset(&(i+1).to_string()).unwrap();
+            assert_eq!(actual, *expected);
+            assert!(actual.syn_pps > last.syn_pps);
+            assert!(actual.deep_per_sec >= last.deep_per_sec);
+            assert!((1..=100_000).contains(&actual.syn_pps));
+            assert!((1..=1_000).contains(&actual.deep_per_sec));
+            let cli = args_for_asn(14618, 4096, false, 20, actual).unwrap();
+            assert_eq!(cli.fast_rate, actual.syn_pps);
+            assert_eq!(cli.deep_rate, actual.deep_per_sec);
+            last = actual;
+        }
+        assert_eq!(speed_preset("5"), Some(ScanSpeed::default()));
+        for invalid in ["0", "10", "-1", "foobar"] {
+            assert!(speed_preset(invalid).is_none());
+        }
+        assert_eq!(speed_preset("9"), Some(ScanSpeed {
+            syn_pps: 2000, deep_per_sec: 100,
+        }));
     }
 }
