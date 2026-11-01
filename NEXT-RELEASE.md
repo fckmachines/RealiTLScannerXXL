@@ -1,4 +1,4 @@
-# Next release — v0.5.4 (PLANNED, NOT IMPLEMENTED)
+# Release v0.5.4 — implementation pending CI and publication
 
 ## Feature: graceful Ctrl+C with processing of partial scan results
 
@@ -103,7 +103,7 @@ settings from the original run.
 8. Publish Linux AMD64 v0.5.4 **only after** Rust tests, release build, and
    interruption smoke tests pass in GitHub Actions.
 
-**Current status:** planning only. No Ctrl+C behavior has been changed.
+**Current status:** implementation in feature branch, not yet published. Added FAST/DEEP progress to the scope.
 
 ---
 
