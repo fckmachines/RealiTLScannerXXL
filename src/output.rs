@@ -66,7 +66,7 @@ impl ReportMeta {
             else {self.max_domain_length.to_string()};
         format!(r#"<section class="summary" aria-label="Сведения о сканировании">
 <div><b>Источник:</b> {info} <span class="muted">· RDAP: не проверено</span></div>
-<div><b>Выбрано:</b> {selected} · <b>Проверено:</b> <span id="scan-checked">            </span>
+<div><b>Выбрано:</b> {selected} · <b>DEEP проверено:</b> <span id="scan-checked">            </span>
  · <b>Найдено:</b> <span id="scan-found">            </span>
  · <b>Время:</b> <time id="scan-time" data-unix="{}">{}</time></div>
 <div class="muted">{fast}DEEP {}/с · {policy} · лимит имени: {length}</div>
@@ -130,11 +130,7 @@ if(stamp) {
  if(!Number.isNaN(date.getTime()))stamp.textContent=date.toLocaleString('ru-RU');
 }
 const copyStatus=document.getElementById('copy-status');
-async function copyDomain(domain) {
- // Clipboard may be inaccessible on file:// or restricted browser profiles.
- if(navigator.clipboard && typeof navigator.clipboard.writeText==='function'){
-  try {await navigator.clipboard.writeText(domain);return true;} catch(_){}
- }
+function legacyCopy(domain) {
  const input=document.createElement('textarea');
  input.value=domain;input.readOnly=true;input.setAttribute('aria-hidden','true');
  input.style.position='fixed';input.style.opacity='0';
@@ -145,6 +141,16 @@ async function copyDomain(domain) {
  input.remove();
  return ok;
 }
+async function copyDomain(domain) {
+ // On file:// Firefox/Waterfox, perform the synchronous legacy path first
+ // while click activation is still valid, then try the Clipboard API.
+ if(location.protocol==='file:' && legacyCopy(domain))return true;
+ if(navigator.clipboard && typeof navigator.clipboard.writeText==='function'){
+  try {await navigator.clipboard.writeText(domain);return true;} catch(_){}
+ }
+ return legacyCopy(domain);
+}
+
 tbody.addEventListener('click',async event=>{
  const button=event.target.closest('button[data-domain]');
  if(!button || !tbody.contains(button))return;
@@ -548,6 +554,7 @@ mod tests {
         assert!(html.contains("<details id=\"methodology\">"));
         assert!(html.contains("navigator.clipboard"));
         assert!(html.contains("execCommand('copy')"));
+        assert!(html.contains("location.protocol==='file:' && legacyCopy(domain)"));
         tokio::fs::remove_file(path).await.unwrap();
     }
 
