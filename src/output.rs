@@ -92,6 +92,28 @@ pub async fn writer(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn resumed_deep_appends_without_overwriting_previous_results() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "realitl-output-test-{}-{nonce}.csv",std::process::id()
+        ));
+        let target=Record {
+            ip:"192.0.2.1".parse().unwrap(), origin:"192.0.2.1".into(),
+            cert_domain:"example.com".into(), cert_issuer:"Example CA".into(), geo:"ZZ".into(),
+        };
+        for append in [false,true] {
+            let (tx,rx)=async_channel::bounded(2);
+            tx.send(target.clone()).await.unwrap();
+            drop(tx);
+            writer(rx,path.to_str().unwrap().to_owned(),false,append).await.unwrap();
+        }
+        let text=tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(text.matches("IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE").count(),1);
+        assert_eq!(text.matches("192.0.2.1,192.0.2.1,example.com").count(),2);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
     #[test]
     fn format_record_basic_row() {
         let rec = Record {
