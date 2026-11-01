@@ -272,6 +272,8 @@ async fn main() -> Result<()> {
         };
         producer_handle.take().expect("producer exists").await??;
         let discovery = masscan::discover(&workspace, cli.port, cli.fast_rate, cli.fast_wait).await?;
+        // Explicit drop is required before a noninteractive process::exit(130).
+        drop(workspace);
         if discovery.interrupted {
             let action = if interactive_recovery(&cli) {
                 menu::pause_fast(discovery.addresses.len()).await?
@@ -435,7 +437,7 @@ async fn main() -> Result<()> {
 
     if let Some(handle) = progress_handle { handle.abort(); }
     if !cli.domains_only {
-        println!("\\nИТОГ СКАНИРОВАНИЯ\\n{}", stats.snapshot().summary(started.elapsed()));
+        println!("\nИТОГ СКАНИРОВАНИЯ\n{}", stats.snapshot().summary(started.elapsed()));
         if paused_any { println!("Сканирование завершено после остановки Ctrl+C."); }
         println!("Примечание: TLS/HTTPS-кандидат не гарантирует совместимость с Xray REALITY.");
     }
