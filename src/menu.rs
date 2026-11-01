@@ -102,10 +102,10 @@ async fn prompt_pause(has_pending: bool, default: PauseAction) -> Result<PauseAc
     // second Ctrl+C can still be observed by the Tokio signal handler.
     let handle = tokio::task::spawn_blocking(move || prompt("   Choice: "));
     tokio::select! {
-        line = handle => Ok(parse_pause_choice(
-            line.context("Ошибка чтения выбора")?.as_deref().unwrap_or("0"),
-            has_pending, default
-        )),
+        line = handle => {
+            let answer = line.context("Ошибка чтения выбора")??;
+            Ok(parse_pause_choice(answer.as_deref().unwrap_or("0"), has_pending, default))
+        },
         _ = tokio::signal::ctrl_c() => {
             eprintln!("   Second Ctrl+C: сохраняем найденное и завершаем.");
             Ok(PauseAction::Forced)
