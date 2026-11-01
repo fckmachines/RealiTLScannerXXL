@@ -28,6 +28,7 @@ pub async fn writer(
     rx: async_channel::Receiver<Record>,
     out_path: String,
     domains_only: bool,
+    append: bool,
 ) -> anyhow::Result<()> {
     // Wrap the output file in a BufWriter: every raw `write_all` on a
     // `tokio::fs::File` is dispatched to the blocking-fs pool, so at high
@@ -36,10 +37,14 @@ pub async fn writer(
     let mut file = if out_path.is_empty() {
         None
     } else {
-        let f = tokio::fs::File::create(&out_path).await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).write(true);
+        if append { options.append(true); } else { options.truncate(true); }
+        let f = options.open(&out_path).await?;
         let mut f = BufWriter::new(f);
-        f.write_all(b"IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n")
-            .await?;
+        if !append {
+            f.write_all(b"IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n").await?;
+        }
         Some(f)
     };
 
