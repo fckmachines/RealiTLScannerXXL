@@ -97,6 +97,33 @@ rather than exhausting disk space unexpectedly.
 defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
 or its thread count.
 
+## Nine scan speed presets (v0.5.3)
+
+Interactive menu **[5] Скорость** now has nine ordered presets, a custom
+option **[10]**, and **[0]** to return without changing the current speed.
+
+| Key | Preset | FAST: Masscan SYN packets/s | DEEP: new probes/s |
+| --- | --- | ---: | ---: |
+| [1] | Минимальная | 5 | 1 |
+| [2] | Очень тихая | 10 | 1 |
+| [3] | Тихая | 25 | 2 |
+| [4] | Осторожная | 50 | 5 |
+| [5] | Стандартная (default) | 100 | 10 |
+| [6] | Умеренно быстрая | 250 | 20 |
+| [7] | Быстрая | 500 | 40 |
+| [8] | Высокая | 1000 | 80 |
+| [9] | Очень высокая | 2000 | 100 |
+
+No scan engine, limits, or CLI flag changed. The existing defaults
+remain **100 SYN/s and 10 DEEP/s**. Selected rates apply to both
+interactive ASN scans and CIDR/file scans. Custom values use the existing
+`--fast-rate` range 1..100000 and `--deep-rate` range 1..1000.
+
+A preset controls starts, not *all* packets/second or bandwidth: TLS,
+DNS, HTTPS, TCP retransmissions and other VPS traffic contribute.
+High rates can trigger provider restrictions even on authorized
+networks; use a low profile and follow the hosting provider's AUP.
+
 ## VPS-friendly rate limits and result locations (v0.5.2)
 
 Defaults have been reduced to **20 Unicode characters** for input domains
@@ -109,11 +136,11 @@ DNS and HTTPS generate additional traffic. Low rates do **not** guarantee
 a VPS provider will allow scanning; comply with the provider's AUP and
 scan only authorized ranges.
 
-In the interactive menu choose **[5] Скорость**: quiet
-(25 SYN/s, 2 DEEP/s), standard (100 SYN/s, 10 DEEP/s), faster
-(250 SYN/s, 20 DEEP/s), or custom positive rate values.
-A quiet mode is preferable when the provider's policy or traffic budget
-is uncertain; the operator must still obtain authorization.
+In the interactive menu choose **[5] Скорость** for nine profiles,
+ranging from 5 SYN/s and 1 DEEP/s to 2000 SYN/s and 100 DEEP/s,
+or **[10]** for custom values (see v0.5.3 table above). A low-rate
+profile is preferable when the provider's policy or traffic budget is
+uncertain; the operator must still obtain authorization.
 
 ```bash
 # An authorized finite IPv4 range; gentle two-stage scan:
