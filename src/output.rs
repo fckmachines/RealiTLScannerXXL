@@ -260,11 +260,12 @@ pub fn reserve_pair(requested: &str) -> anyhow::Result<Option<(String,String)>> 
     anyhow::bail!("Нет свободного имени для CSV/HTML в {}",parent.display())
 }
 
-async fn open_html(path: &str, append: bool) -> anyhow::Result<BufWriter<tokio::fs::File>> {
+async fn open_html(path: &str, append: bool, meta: Option<&ReportMeta>) -> anyhow::Result<BufWriter<tokio::fs::File>> {
     if !append {
         let file=tokio::fs::OpenOptions::new().write(true).truncate(true).open(path).await?;
         let mut writer=BufWriter::new(file);
-        writer.write_all(HTML_HEAD.as_bytes()).await?;
+        let header=HTML_HEAD.replace("<!--SCAN_SUMMARY-->", &meta.map(ReportMeta::header).unwrap_or_default());
+        writer.write_all(header.as_bytes()).await?;
         return Ok(writer);
     }
     let mut file=tokio::fs::OpenOptions::new().read(true).write(true).open(path).await?;
@@ -278,6 +279,30 @@ async fn open_html(path: &str, append: bool) -> anyhow::Result<BufWriter<tokio::
     file.set_len(len-tail).await?;
     file.seek(SeekFrom::Start(len-tail)).await?;
     Ok(BufWriter::new(file))
+}
+
+/// Update two fixed-width numeric placeholders without rewriting potentially
+/// massive HTML or disturbing the exact footer required for Ctrl+C resume.
+/// Width is fixed, ASCII-only, and can be patched after BufWriter is closed.
+async fn patch_html_counts(path: &str, checked: u64, found: u64) -> anyhow::Result<()> {
+    let mut file=tokio::fs::OpenOptions::new().read(true).write(true).open(path).await?;
+    let size=file.metadata().await?.len().min(16_384) as usize;
+    let mut start=vec![0u8;size];
+    file.read_exact(&mut start).await?;
+    for (id,amount) in [("scan-checked",checked),("scan-found",found)] {
+        let marker=format!("id=\"{id}\">");
+        if let Some(index)=start.windows(marker.len()).position(|window| window==marker.as_bytes()) {
+            anyhow::ensure!(amount<1_000_000_000_000,"Слишком большой счётчик");
+            let offset=(index+marker.len()) as u64;
+            file.seek(SeekFrom::Start(offset)).await?;
+            file.write_all(format!("{amount:>12}").as_bytes()).await?;
+        } else {
+            // Legacy test calls without metadata leave the header absent.
+            continue;
+        }
+    }
+    file.flush().await?;
+    Ok(())
 }
 
 /// Pure formatter for a single CSV row. Extracted so it can be unit-tested
@@ -300,6 +325,8 @@ pub async fn writer(
     domains_only: bool,
     append: bool,
     html_path: Option<String>,
+    meta: Option<Arc<ReportMeta>>,
+    stats: Option<Arc<Stats>>,
 ) -> anyhow::Result<()> {
     // Wrap the output file in a BufWriter: every raw `write_all` on a
     // `tokio::fs::File` is dispatched to the blocking-fs pool, so at high
@@ -320,7 +347,7 @@ pub async fn writer(
     };
 
     let mut html = match html_path {
-        Some(ref path) => Some(open_html(path,append).await?),
+        Some(ref path) => Some(open_html(path,append,meta.as_deref()).await?),
         None => None,
     };
 
@@ -335,6 +362,7 @@ pub async fn writer(
     };
 
     let mut printed_header = false;
+    let mut saved_rows = 0u64;
     while let Ok(rec) = rx.recv().await {
         if !domains_only {
             if !printed_header {
@@ -353,6 +381,7 @@ pub async fn writer(
         }
         if let Some(f) = html.as_mut() {
             f.write_all(html_row(&rec).as_bytes()).await?;
+            saved_rows += 1;
         }
         if let Some(stdout) = stdout.as_mut() {
             stdout.write_all(rec.cert_domain.as_bytes()).await?;
@@ -367,6 +396,16 @@ pub async fn writer(
     if let Some(mut f) = html {
         f.write_all(HTML_FOOT.as_bytes()).await?;
         f.flush().await?;
+        drop(f);
+        if meta.is_some() {
+            if let Some(path)=html_path.as_deref() {
+                let (checked,found)=if let Some(stats)=stats.as_ref() {
+                    let snapshot=stats.snapshot();
+                    (snapshot.processed(),snapshot.accepted())
+                } else {(saved_rows,saved_rows)};
+                patch_html_counts(path,checked,found).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -390,7 +429,7 @@ mod tests {
             let (tx,rx)=async_channel::bounded(2);
             tx.send(target.clone()).await.unwrap();
             drop(tx);
-            writer(rx,path.to_str().unwrap().to_owned(),false,append,None).await.unwrap();
+            writer(rx,path.to_str().unwrap().to_owned(),false,append,None,None,None).await.unwrap();
         }
         let text=tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(text.matches("IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE").count(),1);
@@ -427,7 +466,7 @@ mod tests {
                 tls_ms:200,san_count:3,via_san:true,verified_http:true
             }).await.unwrap();
             drop(tx);
-            writer(rx,first.0.clone(),false,append,Some(first.1.clone())).await.unwrap();
+            writer(rx,first.0.clone(),false,append,Some(first.1.clone()),None,None).await.unwrap();
         }
         let csv=std::fs::read_to_string(&first.0).unwrap();
         let html=std::fs::read_to_string(&first.1).unwrap();
@@ -441,6 +480,75 @@ mod tests {
         }
         std::fs::remove_file(original).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn domain_actions_are_icons_only_and_safe() {
+        let good=Record {ip:"192.0.2.1".parse().unwrap(),origin:"a".into(),
+            cert_domain:"WWW.Example.org".into(),cert_issuer:"Let's Encrypt".into(),
+            geo:"US".into(),tls_ms:27,san_count:2,via_san:false,verified_http:true};
+        let html=html_row(&good);
+        assert!(html.contains("href=\"https://www.example.org/\""));
+        assert!(html.contains("data-domain=\"www.example.org\""));
+        assert!(html.contains("title=\"Скопировать домен\""));
+        assert!(html.contains("title=\"Открыть сайт\""));
+        assert!(!html.contains(">Открыть<"));
+        assert!(!html.contains(">Копировать<"));
+        assert_eq!(safe_link_domain("javascript:alert(1)"),None);
+        assert_eq!(safe_link_domain("evil.example/\"onclick=\"hack"),None);
+        assert_eq!(safe_link_domain("bad..example"),None);
+        assert_eq!(safe_link_domain("bad_example.org"),None);
+        assert_eq!(safe_link_domain("evil.example<script>"),None);
+        let mut malicious=good.clone();
+        malicious.cert_domain="https://evil.example/<script>".into();
+        let markup=html_row(&malicious);
+        assert!(!markup.contains("href="));
+        assert!(!markup.contains("data-domain="));
+        assert!(markup.contains("&lt;script&gt;"));
+    }
+    #[test]
+    fn compact_metadata_cannot_inject_markup_and_does_not_invent_rdap() {
+        let meta=ReportMeta {source:"AS123".into(),planned:Some(4096),asn:Some(123),
+            operator:Some("<script>alert(1)</script>".into()),prefixes:Some(7),
+            asn_total:Some(50_000),fast:true,fast_rate:100,deep_rate:10,
+            reality_sni:true,check_http:true,max_domain_length:20,started_unix:1793491200};
+        let rendered=meta.header();
+        assert!(rendered.contains("AS123"));
+        assert!(rendered.contains("4096"));
+        assert!(rendered.contains("&lt;script&gt;"));
+        assert!(!rendered.contains("<script>"));
+        assert!(rendered.contains("RDAP: не проверено"));
+        assert!(rendered.contains("выборка"));
+        let plain=ReportMeta{source:"192.0.2.0/24".into(),asn:None,operator:None,
+            prefixes:None,asn_total:None,..meta};
+        assert!(plain.header().contains("192.0.2.0/24"));
+        assert!(!plain.header().contains("AS123"));
+    }
+    #[tokio::test]
+    async fn metadata_counts_updated_after_writer_exit() {
+        let dir=std::env::temp_dir();
+        let name=format!("realitl-metadata-{}-{}.html",std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());
+        let path=dir.join(name);
+        tokio::fs::File::create(&path).await.unwrap();
+        let meta=ReportMeta {source:"192.0.2.0/24".into(),planned:Some(256),
+            asn:None,operator:None,prefixes:None,asn_total:None,fast:false,
+            fast_rate:100,deep_rate:10,reality_sni:false,check_http:false,
+            max_domain_length:20,started_unix:1793491200};
+        let (tx,rx)=async_channel::bounded(1);
+        tx.send(Record {ip:"192.0.2.1".parse().unwrap(),origin:"x".into(),
+            cert_domain:"example.org".into(),cert_issuer:"Test CA".into(),geo:"ZZ".into(),
+            tls_ms:150,san_count:1,via_san:false,verified_http:false}).await.unwrap();
+        drop(tx);
+        writer(rx,String::new(),true,false,Some(path.to_string_lossy().to_string()),
+            Some(Arc::new(meta)),None).await.unwrap();
+        let html=tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(html.contains("id=\"scan-checked\">           1</span>"));
+        assert!(html.contains("id=\"scan-found\">           1</span>"));
+        assert!(html.contains("<details id=\"methodology\">"));
+        assert!(html.contains("navigator.clipboard"));
+        assert!(html.contains("execCommand('copy')"));
+        tokio::fs::remove_file(path).await.unwrap();
     }
 
     #[test]
