@@ -84,7 +84,7 @@ jobs:
             --no-network-info --thread 2 --timeout 1 --out "$temp/scan.csv" \
             >"$temp/stdout" 2>"$temp/stderr"
           grep -Fq 'Проверено: 1' "$temp/stdout"
-          grep -Fq 'найдено 1 IP' "$temp/stderr"
+          grep -Fq '[FAST] Готово: 1 уникальных IP' "$temp/stderr"
           grep -Fq 'IP,ORIGIN,CERT_DOMAIN' "$temp/scan.csv"
           test ! -e "$temp/out.csv"
 
