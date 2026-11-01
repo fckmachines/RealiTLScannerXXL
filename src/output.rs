@@ -1,5 +1,5 @@
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncWriteExt, AsyncReadExt, AsyncSeekExt, BufWriter, SeekFrom};
 
@@ -39,6 +39,7 @@ table{width:100%;border-collapse:collapse;font-size:.93rem}
 th,td{padding:10px;border-bottom:1px solid #374151;text-align:left;overflow-wrap:anywhere}
 th{background:#1f2937;cursor:pointer;position:sticky;top:0}
 tbody tr:hover{background:#1f2937}
+tr[hidden]{display:none}
 .score{font-weight:700;color:#86efac}
 a{color:#93c5fd}small{color:#9ca3af}
 @media(max-width:750px){body{padding:0 8px}th,td{padding:6px;font-size:.82rem}}
@@ -74,7 +75,9 @@ function sort(){
   let result=numeric?(Number(x)-Number(y)):x.localeCompare(y,'ru',{numeric:true});
   return ascending?result:-result;
  });
- tbody.append(...rows);refresh();
+ const fragment=document.createDocumentFragment();
+ for(const row of rows)fragment.appendChild(row);
+ tbody.appendChild(fragment);refresh();
 }
 for(const th of document.querySelectorAll('th[data-key]')){
  th.addEventListener('click',()=>{
