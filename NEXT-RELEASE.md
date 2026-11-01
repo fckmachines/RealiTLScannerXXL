@@ -1,11 +1,11 @@
-# Next release — v0.5.5 (progress indicators)
+# Release v0.5.5 — shipped (2026-11-01)
 
 **Scope:** display exact completed/remaining/percentage and estimated
 completion time for DEEP where a finite target count is known, and
 explicitly labelled rate-based FAST estimates. Preserve the already
 released v0.5.4 Ctrl+C handling. Keep CLI stdout clean for
 `--domains-only`; do not claim exact totals for streaming sources.
-Status: implementation submitted, pending CI/release.
+Status: released after passing Rust tests, AMD64 build and smoke test. See https://github.com/fckmachines/RealiTLScannerXXL/releases/tag/v0.5.5 and PR #11.
 
 ---
 
