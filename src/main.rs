@@ -265,6 +265,34 @@ async fn main() -> Result<()> {
     // --- producer ---
     let source_total = asn_job.as_ref().map(|(_, n)| *n)
         .or_else(|| cli.addr.as_deref().and_then(finite_addr_total));
+    // Capture source metadata before the immutable RIPEstat scan plan is
+    // transferred into the producer task. No extra network requests.
+    let source_description=if let Some(asn)=cli.asn.as_ref() {
+        asn.clone()
+    } else if let Some(addr)=cli.addr.as_ref() {
+        format!("IP/CIDR: {addr}")
+    } else if let Some(path)=cli.input.as_ref() {
+        format!("Файл: {}",path.display())
+    } else if let Some(url)=cli.url.as_ref() {
+        format!("URL: {url}")
+    } else {String::from("неизвестно")};
+    let source_description=source_description.chars().take(160).collect();
+    let report_meta=Arc::new(output::ReportMeta {
+        source:source_description,
+        planned:source_total,
+        asn:asn_job.as_ref().map(|(plan,_)|plan.asn),
+        operator:asn_job.as_ref().and_then(|(plan,_)|plan.holder.clone()),
+        prefixes:asn_job.as_ref().map(|(plan,_)|plan.observed_prefixes),
+        asn_total:asn_job.as_ref().map(|(plan,_)|plan.total),
+        fast:cli.fast,
+        fast_rate:cli.fast_rate,
+        deep_rate:cli.deep_rate,
+        reality_sni:cli.reality_sni,
+        check_http,
+        max_domain_length:cli.max_domain_length,
+        started_unix:std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
+    });
     let ipv6 = cli.ipv6;
     let tx_host_producer = tx_host.clone();
     let producer: tokio::task::JoinHandle<Result<()>> = if let Some(addr) = cli.addr.clone() {
@@ -377,6 +405,8 @@ async fn main() -> Result<()> {
         let writer_handle = tokio::spawn(output::writer(
             rx_rec, csv_path.clone(), cli.domains_only, append_output,
             html_path.clone(),
+            Some(report_meta.clone()),
+            Some(stats.clone()),
         ));
         let paused = Arc::new(AtomicBool::new(false));
         let (tx_held, rx_held) = async_channel::unbounded::<Host>();

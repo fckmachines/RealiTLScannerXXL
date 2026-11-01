@@ -87,6 +87,30 @@ jobs:
           grep -Fq 'IP,ORIGIN,CERT_DOMAIN' "$temp"/scan-*.csv
           grep -Fq 'id="search"' "$temp"/scan-*.html
           grep -Fq 'id="results"' "$temp"/scan-*.html
+          grep -Fq 'id="scan-checked"' "$temp"/scan-*.html
+          grep -Fq 'id="scan-found"' "$temp"/scan-*.html
+          grep -Fq '<details id="methodology">' "$temp"/scan-*.html
+          grep -Fq "execCommand('copy')" "$temp"/scan-*.html
+          grep -Fq 'IP/CIDR: 192.0.2.1/32' "$temp"/scan-*.html
+          # Validate embedded JavaScript syntax in the real generated report.
+          python3 - "$temp/report.js" "$temp"/scan-*.html <<'PY'
+          from html.parser import HTMLParser
+          import pathlib, sys
+          class ScriptReader(HTMLParser):
+              def __init__(self):
+                  super().__init__(); self.inside = False; self.scripts = []
+              def handle_starttag(self, tag, attrs):
+                  if tag == "script": self.inside = True
+              def handle_endtag(self, tag):
+                  if tag == "script": self.inside = False
+              def handle_data(self, data):
+                  if self.inside: self.scripts.append(data)
+          parser = ScriptReader()
+          parser.feed(pathlib.Path(sys.argv[2]).read_text())
+          assert parser.scripts
+          pathlib.Path(sys.argv[1]).write_text("\\n".join(parser.scripts))
+          PY
+          node --check "$temp/report.js"
           test ! -e "$temp/scan.csv"
           test ! -e "$temp/out.csv"
 

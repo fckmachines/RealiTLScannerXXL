@@ -34,6 +34,40 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## v0.6.1 — concise scan context, transparent score, icon-only actions
+
+The offline HTML report has a compact top summary with scan source
+(AS number, RIPEstat ASN operator, advertised prefixes, announced IPv4
+count and whether the ASN was sampled), selected count, actual DEEP
+completed/accepted count, date, FAST/DEEP rate, enabled filtering
+and hostname length limit. Registered IP-block ownership is **not**
+inferred from ASN or GEO; it says "RDAP: не проверено".
+For CIDR/file/URL input, no ASN is invented. On FAST interruptions before
+DEEP begins, there are no newly generated CSV/HTML result files.
+
+Each accepted row's domain cell now has exactly two icon controls:
+an external-site icon opens the validated hostname at `https://`
+in a new tab; a copy icon copies only the bare SNI domain (no scheme,
+path, slash or port). Certificate-supplied values are escaped; unsafe
+names are shown as plain text without any clickable link.
+Clipboard uses `navigator.clipboard.writeText` with a best-effort
+`document.execCommand('copy')` fallback for local `file://` reports.
+A status line reports success only when a copy API confirms success.
+Interactive icons have accessible labels/tooltips but no visible button text.
+
+At the bottom, a collapsed section explains the fixed base **60 points**
+and the exact scoring formula: +10 if SAN alternative selected, +10 when
+IP-pinned HTTPS verification was enabled and passed, and +15/+8/+3/+0
+for initial TLS duration <200/<500/<1000/≥1000 milliseconds.
+**The maximum score is 95**, not 100. The formula remains purely advisory;
+no added filters, no change to the CSV 5-column schema or FAST/DEEP.
+Actual enabled checks are described, with explicit caveats for
+non-REALITY/HTTP-disabled scans and unverifiable reputations.
+
+The report continues to work without network dependencies and safely
+reopens/appends after Ctrl+C. Existing generated pairs retain their
+collision-proof filenames. Existing scans from v0.6.0 are unaffected.
+
 ## v0.6.0 — SAN discovery, safe output names, offline HTML viewer
 
 The original strict TLS 1.3, ALPN `h2`, optional forward DNS and pinned
