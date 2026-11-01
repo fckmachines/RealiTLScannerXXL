@@ -20,6 +20,42 @@ RDAP result; otherwise show 'не проверено'. For non-ASN input,
 do not invent an ASN or full-scan percentage. Clearly mark sampled,
 full, interrupted and unknown-size inputs. Avoid lengthy tables.
 
+### In result rows: open website and copy bare SNI hostname
+
+Requested 2026-11-01. Keep original sortable/searchable table and add
+two distinct intuitive actions next to each selected certificate domain:
+
+* Visible domain label itself is a hyperlink targeting
+  `https://<validated candidate hostname>/` in a new tab, with
+  `target="_blank" rel="noopener noreferrer"`. The literal page link
+  contains the HTTPS scheme, but the visible label remains the bare domain.
+* A nearby small copy button (accessible name "Скопировать домен")
+  copies **only the exact selected SNI hostname** (e.g. `example.com`,
+  optionally `www.example.com`), with **no** scheme, trailing slash,
+  URL path, port or whitespace. Copy neither the scanned IP nor the
+  certificate issuer. Display unobtrusive "Скопировано" only on success;
+  provide selectable text and a short error on denied clipboard access.
+* Make this work in an **offline `file://` HTML report** opened in
+  Firefox and Waterfox: try the async Clipboard API in a browser-supported
+  user gesture; fall back to a temporary selected textarea and
+  `document.execCommand('copy')` if needed. Never claim copy succeeded if
+  both mechanisms fail. Test in an actual local-file browser environment
+  where possible; headless DOM checks alone are insufficient evidence.
+* Treat certificate-derived names as **untrusted content**: escape text
+  and HTML attributes; validate the hostname before producing an external
+  `https:` link; reject URL schemes, controls and markup. Render as
+  non-clickable/selectable text if invalid, without silently throwing
+  away an otherwise accepted CSV row.
+* Preserve original search, sorting, scoring, HTML-only offline
+  operation, existing CSV schema, and unique per-run filenames.
+  Do not create additional HTTP requests or perform any extra scan.
+  No changes to acceptance filters, candidate counts or ratings.
+
+Add regression checks for plain hostname copy value, HTML injection/
+unsafe-link rejection, two distinct click targets, search/sort behavior
+and offline clipboard fallback. This is a UI-only addition; no scanner
+logic changes.
+
 ### Below results: one collapsed <details> section
 
 Label: 'Рейтинг: методика и базовые 60 баллов'. Explain succinctly:
