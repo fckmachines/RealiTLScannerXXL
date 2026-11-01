@@ -34,6 +34,58 @@ A release is published automatically **after tests and a successful AMD64 build*
 Do not expect an installer downloaded from a feature branch to work until its first
 release is visible in GitHub Releases.
 
+## v0.6.0 — SAN discovery, safe output names, offline HTML viewer
+
+The original strict TLS 1.3, ALPN `h2`, optional forward DNS and pinned
+HTTPS rules remain unchanged. The scanner now extracts DNS names from the
+certificate's **Subject Alternative Name (SAN)** extension, preferring the
+legacy CN to preserve previously accepted results. If CN fails the existing
+checks, it tries other distinct SAN DNS names (up to 8 names including CN).
+Each SAN is checked by the **same** existing filters; no new global
+hard-rejection thresholds have been added. As before, the **20-character
+default name limit** applies; the user can raise it via menu [4] or
+`--max-domain-length`. Wildcard entries are skipped rather than guessed.
+
+Only the **first valid hostname per IP** is saved, to avoid overloading the
+target with repeated DNS/HTTPS requests and to keep the CSV's accepted-host
+counters consistent. The report indicates whether the chosen name came from
+CN or SAN, alongside the number of DNS SAN names in the certificate.
+Thus SAN support improves discovery without scanning every possible name.
+
+Every fresh run now allocates a unique CSV/HTML pair, even when the user
+supplies `--out results.csv`. Example:
+
+```text
+results-1793491200-1234-0.csv
+results-1793491200-1234-0.html
+```
+
+An existing `results.csv` or older generated report is **never truncated
+or overwritten**. On Ctrl+C and subsequent DEEP resume, both files continue
+to receive results in the **same pair**. Files are created only after
+the existing FAST preflight succeeds. If `--out ""` disables file output,
+HTML is also disabled.
+
+Open the HTML file locally in Firefox/Waterfox, e.g.:
+
+```bash
+xdg-open results-*.html
+```
+
+The report works without network access or external libraries and includes
+full-text search, sortable columns, a minimum-score filter, GEO, IP,
+selected SNI domain, issuer, rough TLS connect/handshake milliseconds,
+SAN source/count and an **advisory** score. Scores are purely a sorting aid,
+not an official Xray REALITY compatibility score or uptime/ASN/reachability
+test. No candidate is discarded for a low score. Its components are the
+successful initial TLS test (base), selected SAN, optional HTTPS verification
+and initial TLS handshake duration. A slow host can still be reliable.
+
+The original **five-column CSV schema** is preserved for existing scripts:
+`IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE`. HTML is supplementary, not a
+replacement for CSV. Existing rate profiles, FAST engine, progress and
+Ctrl+C recovery are unchanged.
+
 ## FAST SCAN — Masscan + Rust DEEP SCAN (v0.5.0)
 
 **Masscan is the only FAST engine.** Existing Rust/Tokio TLS scanning remains
