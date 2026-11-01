@@ -55,9 +55,9 @@ be blocked by a VPS provider or network/firewall. The installer does **not**
 modify nftables, source ports, routing, or firewall rules.
 
 ```bash
-# Two-stage ASN sample: 4096 IPs, rate limited to 1000 packets/s
+# Two-stage ASN sample: 4096 IPs, rate limited to 100 packets/s
 sudo realitlscanner --asn AS14618 --max-ips 4096 \
-  --fast --fast-rate 1000 --fast-wait 5 \
+  --fast --fast-rate 100 --fast-wait 5 \
   --thread 64 --timeout 5 --reality-sni --out results.csv
 
 # Finite CIDR scan
@@ -92,22 +92,64 @@ file. It does not accept domains, IPv6, `--url`, or a lone bare `--addr IP`
 single finite address. FAST mode refuses over 5 million enumerated inputs
 rather than exhausting disk space unexpectedly.
 
-`--fast-rate` defaults to **1000 packets/second**, configurable from 1 to
+`--fast-rate` defaults to **100 packets/second**, configurable from 1 to
 100000; higher rates are not automatically safer or more accurate. `--fast-wait`
 defaults to **5 seconds** (range 1–60). Neither option alters DEEP timeouts
 or its thread count.
 
+## VPS-friendly rate limits and result locations (v0.5.2)
+
+Defaults have been reduced to **20 Unicode characters** for input domains
+and certificate Common Names (CNs), **100 SYN packets per second** for
+Masscan FAST discovery and **10 new DEEP probes per second**. The global
+DEEP start-rate gate is shared across all worker tasks; `--thread` still
+limits how many slow or overlapping deep checks may be in flight. Neither
+rate is a guaranteed cap on **all outgoing packets**, as TCP handshakes,
+DNS and HTTPS generate additional traffic. Low rates do **not** guarantee
+a VPS provider will allow scanning; comply with the provider's AUP and
+scan only authorized ranges.
+
+In the interactive menu choose **[5] Скорость**: quiet
+(25 SYN/s, 2 DEEP/s), standard (100 SYN/s, 10 DEEP/s), faster
+(250 SYN/s, 20 DEEP/s), or custom positive rate values.
+A quiet mode is preferable when the provider's policy or traffic budget
+is uncertain; the operator must still obtain authorization.
+
+```bash
+# An authorized finite IPv4 range; gentle two-stage scan:
+sudo realitlscanner --addr 192.0.2.0/24 --fast \
+  --fast-rate 25 --deep-rate 2 --thread 8 --max-domain-length 20 \
+  --reality-sni --out results.csv
+
+# CLI defaults for FAST are 100 SYN/s and 10 DEEP probe starts/s:
+sudo realitlscanner --addr 192.0.2.0/24 --fast --reality-sni
+```
+
+Use `--deep-rate N` to limit DEEP starts (1..1000/s), including
+DEEP-only runs; `--fast-rate N` controls Masscan's SYN send rate
+(1..100000/s). For intentionally slower operation lower either value.
+Masscan has separate `--fast-wait` (seconds to collect replies), and
+`--timeout` is a per-attempt TLS/HTTPS wait, not the scan pacing.
+
+**Results:** `out.csv` (or `--out PATH`) contains only candidates
+that have passed all enabled TLS/DNS/HTTPS checks, with IP, origin,
+certificate CN, issuer and geographic country code. Relative paths are
+resolved from the **working directory**, not `/usr/local/bin`. Rejections
+only affect summary counters. FAST SYN responses are held in private
+temporary files for DEEP handoff and deleted after the run; the program
+does not persist a list of every tested IP.
+
 ## Domain-length filter and English confirmations (v0.5.1)
 
-RealiTLScannerXXL rejects certificate Common Names (CNs) longer than **40
-Unicode characters by default**. This runs immediately after the TLS
+RealiTLScannerXXL rejects certificate Common Names (CNs) longer than **20
+Unicode characters by default** (since v0.5.2). This runs immediately after the TLS
 handshake and certificate inspection, **before** optional forward-DNS
 verification and IP-pinned HTTPS requests, saving time on unsuitable long
 hostnames. If the input itself is a domain (rather than an IP), overlong
 hostnames are skipped before any DNS or TCP connection.
 
 ```bash
-# Default cap: 40 characters
+# Default cap: 20 characters
 realitlscanner --addr 192.0.2.0/24 --reality-sni
 
 # More restrictive: max 25 certificate CN characters
@@ -118,12 +160,12 @@ realitlscanner --addr 192.0.2.0/24 --max-domain-length 0 --reality-sni
 ```
 
 In the interactive menu use **[4] Max domain length** to configure the
-limit (default 40; 0 disables filtering) before choosing an ASN or target
+limit (default 20; 0 disables filtering) before choosing an ASN or target
 source. The setting is applied to both FAST→DEEP and DEEP-only scans.
 
 This checks the **certificate CN**, which is the hostname currently used by
 the existing scanner for its SNI candidates. It does not inspect or limit
-all alternative names (SANs) in the certificate. A limit of 40 can exclude
+all alternative names (SANs) in the certificate. A limit of 20 can exclude
 otherwise valid targets; raise the limit if you prefer completeness.
 
 Confirmation prompts now use `Start scan? [y/N]` (default **No**) and
@@ -143,7 +185,8 @@ BGP-префикс:      203.0.113.0/24
 [1] Сканировать IP / CIDR / несколько диапазонов
 [2] Сканировать сети по ASN (RIPEstat)
 [3] Сканировать IP/CIDR из файла
-[4] Макс. длина домена: 40
+[4] Макс. длина домена: 20
+[5] Скорость: 100 SYN/с · 10 DEEP/с
 [0] Выход
 ```
 

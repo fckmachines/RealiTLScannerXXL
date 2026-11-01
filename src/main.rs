@@ -294,6 +294,14 @@ async fn main() -> Result<()> {
     let writer_handle = tokio::spawn(output::writer(rx_rec, out_path, domains_only));
 
     // --- workers ---
+    // One global cadence shared by ALL DEEP workers. Limiting only the
+    // thread count would still allow a burst of simultaneous TCP handshakes.
+    // Skip missed ticks rather than catching up in bursts after slow probes.
+    let mut cadence = tokio::time::interval(
+        Duration::from_nanos(1_000_000_000 / u64::from(cli.deep_rate))
+    );
+    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let deep_pacer = Arc::new(tokio::sync::Mutex::new(cadence));
     let mut workers = JoinSet::new();
     for _ in 0..thread_count {
         let rx = rx_host.clone();
@@ -303,8 +311,12 @@ async fn main() -> Result<()> {
         let stats = stats.clone();
         let out = tx_rec.clone();
         let params = params.clone();
+        let deep_pacer = deep_pacer.clone();
         workers.spawn(async move {
             while let Ok(h) = rx.recv().await {
+                // Strict global start-rate cap, including DEEP-only runs.
+                // The mutex is held only until the next paced start.
+                deep_pacer.lock().await.tick().await;
                 let outcome = scanner::probe(
                     h,
                     connector.clone(),
@@ -326,8 +338,8 @@ async fn main() -> Result<()> {
     let started = std::time::Instant::now();
     let show_progress = !cli.domains_only && std::io::stdout().is_terminal();
     if show_progress {
-        println!("SCAN | threads: {} | port: {} | HTTP bound to scanned IP: {}",
-            thread_count, cli.port, if check_http { "YES" } else { "NO" });
+        println!("SCAN | threads: {} | port: {} | DEEP rate: <= {} starts/s | HTTP bound to scanned IP: {}",
+            thread_count, cli.port, cli.deep_rate, if check_http { "YES" } else { "NO" });
         println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
     }
     let progress_handle = if show_progress {

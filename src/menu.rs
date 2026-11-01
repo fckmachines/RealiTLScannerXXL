@@ -11,6 +11,48 @@ pub struct Choice {
     pub plan: Option<ScanPlan>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanSpeed { syn_pps: u32, deep_per_sec: u32 }
+
+impl Default for ScanSpeed {
+    fn default() -> Self { Self { syn_pps: 100, deep_per_sec: 10 } }
+}
+impl ScanSpeed {
+    fn append_args(self, args: &mut Vec<String>) {
+        args.extend(["--fast-rate".to_owned(), self.syn_pps.to_string(),
+                     "--deep-rate".to_owned(), self.deep_per_sec.to_string()]);
+    }
+}
+fn valid_rate(text: &str, max: u32) -> Option<u32> {
+    text.trim().parse::<u32>().ok().filter(|v| *v >= 1 && *v <= max)
+}
+fn choose_speed(current: ScanSpeed) -> Result<ScanSpeed> {
+    println!("   Скорость: {} SYN/с; {} DEEP/с", current.syn_pps, current.deep_per_sec);
+    println!("   [1] Тихий режим: 25 SYN/с, 2 DEEP/с");
+    println!("   [2] Стандартный: 100 SYN/с, 10 DEEP/с");
+    println!("   [3] Быстрее: 250 SYN/с, 20 DEEP/с");
+    println!("   [4] Ввести скорости вручную");
+    println!("   [0] Назад");
+    let Some(choice) = prompt("   Выбор: ")? else {return Ok(current)};
+    match choice.as_str() {
+        "1" => Ok(ScanSpeed {syn_pps:25,deep_per_sec:2}),
+        "2" => Ok(ScanSpeed::default()),
+        "3" => Ok(ScanSpeed {syn_pps:250,deep_per_sec:20}),
+        "4" => {
+            let Some(a) = prompt("   FAST SYN пакетов/с [1..100000]: ")?
+                else {return Ok(current)};
+            let Some(b) = prompt("   DEEP новых проверок/с [1..1000]: ")?
+                else {return Ok(current)};
+            match (valid_rate(&a,100_000), valid_rate(&b,1_000)) {
+                (Some(syn_pps),Some(deep_per_sec)) => Ok(ScanSpeed{syn_pps,deep_per_sec}),
+                _ => {eprintln!("   Некорректная скорость; настройки не изменены."); Ok(current)}
+            }
+        }
+        "0" => Ok(current),
+        _ => {eprintln!("   Неизвестный пункт.");Ok(current)}
+    }
+}
+
 fn prompt(message: &str) -> Result<Option<String>> {
     print!("{message}");
     io::stdout().flush()?;
@@ -58,7 +100,7 @@ fn truncate_to(s: &str, limit: usize) -> String {
     shortened
 }
 
-fn render_menu(width: usize, max_domain_length: usize) -> String {
+fn render_menu(width: usize, max_domain_length: usize, speed: ScanSpeed) -> String {
     let entries = [
         "[1] Сканировать IP / CIDR / несколько диапазонов".to_owned(),
         "[2] Сканировать сети по ASN (RIPEstat)".to_owned(),
@@ -66,6 +108,7 @@ fn render_menu(width: usize, max_domain_length: usize) -> String {
         format!("[4] Макс. длина домена: {}",
             if max_domain_length == 0 { "без ограничения".to_owned() }
             else { max_domain_length.to_string() }),
+        format!("[5] Скорость: {} SYN/с · {} DEEP/с", speed.syn_pps, speed.deep_per_sec),
         "[0] Выход".to_owned(),
     ];
     // Total frame width includes two borders plus one padding column on
@@ -88,7 +131,7 @@ fn render_menu(width: usize, max_domain_length: usize) -> String {
     lines.into_iter().map(|line| format!("   {line}")).collect::<Vec<_>>().join("\n")
 }
 
-fn args_for_asn(asn: u32, limit: u64, all: bool, max_domain_length: usize) -> Result<Cli> {
+fn args_for_asn(asn: u32, limit: u64, all: bool, max_domain_length: usize, speed: ScanSpeed) -> Result<Cli> {
     let mut args = vec![
         "realitlscanner".to_string(),
         "--asn".to_string(), format!("AS{asn}"),
@@ -102,6 +145,7 @@ fn args_for_asn(asn: u32, limit: u64, all: bool, max_domain_length: usize) -> Re
         args.push("--max-ips".into());
         args.push(limit.to_string());
     }
+    speed.append_args(&mut args);
     Ok(Cli::try_parse_from(args)?)
 }
 
@@ -121,7 +165,7 @@ fn confirms_full_scan(answer: &str) -> bool {
     answer.eq_ignore_ascii_case("YES")
 }
 
-async fn choose_asn(identity: &Identity, max_domain_length: usize) -> Result<Option<Choice>> {
+async fn choose_asn(identity: &Identity, max_domain_length: usize, speed: ScanSpeed) -> Result<Option<Choice>> {
     let detected = identity.asns.first().map(|n| format!("AS{n}"));
     let message = detected.as_ref()
         .map(|s| format!("   ASN [{s}]: "))
@@ -154,7 +198,7 @@ async fn choose_asn(identity: &Identity, max_domain_length: usize) -> Result<Opt
         match option.as_str() {
             "0" => return Ok(None),
             "1" => {
-                let cli = args_for_asn(plan.asn, limit, false, max_domain_length)?;
+                let cli = args_for_asn(plan.asn, limit, false, max_domain_length, speed)?;
                 return Ok(Some(Choice { cli, plan: Some(plan) }));
             }
             "2" => {
@@ -164,7 +208,7 @@ async fn choose_asn(identity: &Identity, max_domain_length: usize) -> Result<Opt
                     println!("   Full scan cancelled.");
                     continue;
                 }
-                let cli = args_for_asn(plan.asn, limit, true, max_domain_length)?;
+                let cli = args_for_asn(plan.asn, limit, true, max_domain_length, speed)?;
                 return Ok(Some(Choice { cli, plan: Some(plan) }));
             }
             "3" => {
@@ -175,7 +219,7 @@ async fn choose_asn(identity: &Identity, max_domain_length: usize) -> Result<Opt
                     println!("   Будет проверено: {selected} из {} IPv4.",plan.total);
                     let Some(answer) = prompt("   Start scan? [y/N]: ")? else { return Ok(None) };
                     if confirms_yes(&answer) {
-                        let cli = args_for_asn(plan.asn,limit,false,max_domain_length)?;
+                        let cli = args_for_asn(plan.asn,limit,false,max_domain_length,speed)?;
                         return Ok(Some(Choice {cli,plan:Some(plan)}));
                     }
                 } else {
@@ -191,15 +235,20 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("Для пакетного запуска укажите --addr, --asn, --in или --url");
     }
-    let mut max_domain_length = 40usize;
+    let mut max_domain_length = 20usize;
+    let mut speed = ScanSpeed::default();
     loop {
         // Leave 3 columns for left indentation and one for terminal safety.
         let width = terminal_columns().saturating_sub(4).min(68);
-        println!("\n{}", render_menu(width, max_domain_length));
+        println!("\n{}", render_menu(width, max_domain_length, speed));
         let Some(choice) = prompt("   Выбор: ")? else { return Ok(None) };
         if matches!(choice.as_str(), "0" | "q" | "Q") { return Ok(None) };
         if choice == "2" {
-            if let Some(selected) = choose_asn(identity, max_domain_length).await? { return Ok(Some(selected)) }
+            if let Some(selected) = choose_asn(identity, max_domain_length, speed).await? { return Ok(Some(selected)) }
+            continue;
+        }
+        if choice == "5" {
+            speed = choose_speed(speed)?;
             continue;
         }
         if choice == "4" {
@@ -231,6 +280,7 @@ pub async fn choose(identity: &Identity) -> Result<Option<Choice>> {
         }
         args.push("--reality-sni".to_string());
         args.extend(["--max-domain-length".to_owned(), max_domain_length.to_string()]);
+        speed.append_args(&mut args);
         // A lone bare IP retains legacy deep-scan infinite walk; other finite
         // IPv4/CIDR lists use the fast SYN discovery stage by default.
         if choice == "3" || args.get(2).is_some_and(|value| value.contains('/') || value.contains(',')) {
@@ -249,9 +299,9 @@ mod tests {
     #[test]
     fn all_menu_borders_have_same_column_width() {
         for width in [24,32,48,60,68] {
-            let output=render_menu(width, 40);
+            let output=render_menu(width, 20, ScanSpeed::default());
             let cols:Vec<usize>=output.lines().map(cell_width).collect();
-            assert_eq!(cols.len(),9);
+            assert_eq!(cols.len(),10);
             assert!(cols.iter().all(|n| *n==width+3), "{cols:?}");
             for line in output.lines() {
                 assert!(matches!(line.chars().last(), Some('┐' | '┤' | '│' | '┘')));
@@ -260,7 +310,7 @@ mod tests {
     }
     #[test]
     fn standard_width_preserves_longest_option() {
-        assert!(render_menu(68, 40).contains("[1] Сканировать IP / CIDR / несколько диапазонов"));
+        assert!(render_menu(68, 20, ScanSpeed::default()).contains("[1] Сканировать IP / CIDR / несколько диапазонов"));
     }
     #[test]
     fn unicode_width_counts_cyrillic_and_wide_glyphs() {
@@ -273,11 +323,11 @@ mod tests {
         assert_eq!(parse_limit("4096"),Some(4096));
         assert_eq!(parse_limit("0"),None);
         assert_eq!(parse_limit("bad"),None);
-        assert_eq!(args_for_asn(14618,10000,false,25).unwrap().max_ips,10000);
-        assert!(args_for_asn(14618,4096,true,40).unwrap().all);
-        assert!(args_for_asn(14618,4096,false,40).unwrap().fast);
-        assert_eq!(args_for_asn(14618,10000,false,25).unwrap().max_domain_length,25);
-        assert!(render_menu(68,0).contains("без ограничения"));
+        assert_eq!(args_for_asn(14618,10000,false,25,ScanSpeed::default()).unwrap().max_ips,10000);
+        assert!(args_for_asn(14618,4096,true,20,ScanSpeed::default()).unwrap().all);
+        assert!(args_for_asn(14618,4096,false,20,ScanSpeed::default()).unwrap().fast);
+        assert_eq!(args_for_asn(14618,10000,false,25,ScanSpeed::default()).unwrap().max_domain_length,25);
+        assert!(render_menu(68,0,ScanSpeed::default()).contains("без ограничения"));
         assert_eq!(parse_domain_limit("0"), Some(0));
         assert_eq!(parse_domain_limit(" 25 "), Some(25));
         assert_eq!(parse_domain_limit("-1"), None);
@@ -285,5 +335,15 @@ mod tests {
         assert!(!confirms_yes("д") && !confirms_yes("") && !confirms_yes("n"));
         assert!(confirms_full_scan("YES") && confirms_full_scan("yes"));
         assert!(!confirms_full_scan("y") && !confirms_full_scan("ДА"));
+        assert_eq!(ScanSpeed::default(), ScanSpeed{syn_pps:100,deep_per_sec:10});
+        assert_eq!(valid_rate("1",1000),Some(1));
+        assert_eq!(valid_rate("1001",1000),None);
+        assert_eq!(valid_rate("0",1000),None);
+        assert_eq!(valid_rate("bad",1000),None);
+        let custom=args_for_asn(14618,4096,false,20,
+            ScanSpeed{syn_pps:25,deep_per_sec:2}).unwrap();
+        assert_eq!(custom.fast_rate,25);
+        assert_eq!(custom.deep_rate,2);
+        assert!(render_menu(68,20,ScanSpeed::default()).contains("[5] Скорость: 100 SYN/с"));
     }
 }
