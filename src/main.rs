@@ -4,17 +4,19 @@ mod filter;
 mod geo;
 mod host;
 mod iterate;
+mod interrupt;
 mod masscan;
 mod menu;
 mod network;
 mod output;
+mod progress;
 mod resolver;
 mod scanner;
 mod stats;
 
 use crate::cli::Cli;
 use crate::geo::Geo;
-use crate::host::Host;
+use crate::host::{Host, HostType};
 use crate::output::Record;
 use crate::resolver::DnsResolver;
 use crate::stats::Stats;
@@ -26,6 +28,7 @@ use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::io::IsTerminal;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsConnector;
@@ -120,6 +123,44 @@ fn build_client_config() -> Result<Arc<rustls::ClientConfig>> {
 
     cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(cfg))
+}
+
+/// Exact size for simple finite IP/CIDR input. Streaming URLs, files and
+/// legacy bare-IP neighbor walks have unknown totals until fully enumerated.
+fn finite_addr_total(addr: &str) -> Option<u64> {
+    use ipnet::IpNet;
+    let mut total=0u64;
+    let values:Vec<&str>=if addr.contains(',') {addr.split(',').collect()}
+        else if addr.contains('/') {vec![addr]} else {return None};
+    for value in values {
+        let value=value.trim();
+        let count=if let Ok(net)=value.parse::<IpNet>() {
+            match net {
+                IpNet::V4(v4) => 1u64 << (32-v4.prefix_len()),
+                IpNet::V6(v6) => {
+                    let exponent=(128-v6.prefix_len()) as u32;
+                    1u64.checked_shl(exponent)?
+                }
+            }
+        } else if value.parse::<std::net::IpAddr>().is_ok() || crate::host::validate_domain(value) {
+            1
+        } else {return None};
+        total=total.checked_add(count)?;
+    }
+    Some(total)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn counts_finite_addr_without_iterating_huge_networks() {
+        assert_eq!(finite_addr_total("192.0.2.0/24"),Some(256));
+        assert_eq!(finite_addr_total("192.0.2.0/24,198.51.100.1"),Some(257));
+        assert_eq!(finite_addr_total("0.0.0.0/0"),Some(4_294_967_296));
+        assert_eq!(finite_addr_total("192.0.2.1"),None);
+        assert_eq!(finite_addr_total("invalid /bogus"),None);
+    }
 }
 
 #[tokio::main]
@@ -221,10 +262,12 @@ async fn main() -> Result<()> {
     // hits (e.g. large IP sweeps) do not stall probe tasks on the writer.
     let rec_cap = (thread_count * 2).max(256);
     let (tx_host, rx_host) = async_channel::bounded::<Host>(thread_count * 4);
-    let (tx_rec, rx_rec) = async_channel::bounded::<Record>(rec_cap);
+    let (mut tx_rec, mut rx_rec) = async_channel::bounded::<Record>(rec_cap);
     let stats = Arc::new(Stats::default());
 
     // --- producer ---
+    let source_total = asn_job.as_ref().map(|(_, selected)| *selected)
+        .or_else(|| cli.addr.as_deref().and_then(finite_addr_total));
     let ipv6 = cli.ipv6;
     let tx_host_producer = tx_host.clone();
     let producer: tokio::task::JoinHandle<Result<()>> = if let Some(addr) = cli.addr.clone() {
@@ -251,9 +294,11 @@ async fn main() -> Result<()> {
     drop(tx_host);
 
     let mut producer_handle = Some(producer);
-    // FAST is a distinct, complete discovery stage. Do not open/truncate the
-    // result CSV or start TLS workers until the SYN scan has succeeded.
-    let rx_host = if cli.fast {
+    // FAST runs before the CSV writer, so early failure/interruption cannot
+    // truncate verified rows from a previous run.
+    let mut fast_was_interrupted = false;
+    let mut total = source_total;
+    let mut rx_host = if cli.fast {
         let workspace = tokio::select! {
             result = masscan::spool(rx_host) => match result {
                 Ok(workspace) => workspace,
@@ -264,146 +309,192 @@ async fn main() -> Result<()> {
             },
             _ = tokio::signal::ctrl_c() => {
                 producer_handle.take().expect("producer exists").abort();
+                eprintln!("[FAST] Прервано до начала Masscan: открытые IP пока не получены.");
+                if !interrupt::can_prompt(cli.domains_only) { std::process::exit(130); }
                 return Ok(());
             }
         };
-        // Failure reading an input file is reported *before* any Masscan
-        // process runs. The private spool directory is then removed.
         producer_handle.take().expect("producer exists").await??;
-        let discovered = tokio::select! {
-            result = masscan::discover(&workspace, cli.port, cli.fast_rate, cli.fast_wait) => result?,
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-        };
-        let (tx, rx) = async_channel::unbounded();
-        for ip in discovered {
-            tx.try_send(Host {
-                ip: Some(std::net::IpAddr::V4(ip)),
-                origin: ip.to_string(),
-                kind: crate::host::HostType::Ip,
-            })?;
+        let discovered = masscan::discover(&workspace, cli.port, cli.fast_rate, cli.fast_wait).await?;
+        fast_was_interrupted = discovered.interrupted;
+        total = Some(discovered.addresses.len() as u64);
+        let found:Vec<Host> = discovered.addresses.into_iter().map(|ip|Host {
+            ip:Some(std::net::IpAddr::V4(ip)),
+            origin:ip.to_string(),
+            kind:HostType::Ip,
+        }).collect();
+        if fast_was_interrupted {
+            let choice = if interrupt::can_prompt(cli.domains_only) {
+                interrupt::prompt("FAST", found.len(), 0, 0).await
+            } else {
+                interrupt::Decision::Finish
+            };
+            if choice != interrupt::Decision::Process || found.is_empty() {
+                if let Some(path)=interrupt::checkpoint(&found,&cli.out)? {
+                    eprintln!("[FAST] Сохранено {} IP: {}",found.len(),path.display());
+                } else {
+                    eprintln!("[FAST] Открытых IP не получено.");
+                }
+                if !interrupt::can_prompt(cli.domains_only) {std::process::exit(130);}
+                return Ok(());
+            }
         }
+        let (tx, rx) = async_channel::unbounded();
+        for host in found { tx.try_send(host)?; }
         drop(tx);
         rx
     } else {
         rx_host
     };
 
-    // --- writer ---
-    let out_path = cli.out.clone();
-    let domains_only = cli.domains_only;
-    let writer_handle = tokio::spawn(output::writer(rx_rec, out_path, domains_only));
+    // Each DEEP round terminates and flushes its writer before presenting
+    // interruption choices. Continuation creates a new append-mode writer:
+    // previously verified rows are preserved, never overwritten.
+    let deep_started = std::time::Instant::now();
+    let mut append = false;
+    loop {
+        let writer_handle = tokio::spawn(output::writer(
+            rx_rec, cli.out.clone(), cli.domains_only, append
+        ));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (tx_deferred, rx_deferred) = async_channel::unbounded::<Host>();
+        let mut cadence = tokio::time::interval(
+            Duration::from_nanos(1_000_000_000 / u64::from(cli.deep_rate))
+        );
+        cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let deep_pacer = Arc::new(tokio::sync::Mutex::new(cadence));
+        let mut workers = JoinSet::new();
+        for _ in 0..thread_count {
+            let rx = rx_host.clone();
+            let connector = connector.clone();
+            let resolver = resolver.clone();
+            let geo = geo.clone();
+            let stats = stats.clone();
+            let out = tx_rec.clone();
+            let params = params.clone();
+            let deep_pacer = deep_pacer.clone();
+            let paused = paused.clone();
+            let deferred = tx_deferred.clone();
+            workers.spawn(async move {
+                while let Ok(host) = rx.recv().await {
+                    if paused.load(Ordering::SeqCst) {
+                        let _ = deferred.try_send(host);
+                        break;
+                    }
+                    deep_pacer.lock().await.tick().await;
+                    if paused.load(Ordering::SeqCst) {
+                        let _ = deferred.try_send(host);
+                        break;
+                    }
+                    let outcome = scanner::probe(
+                        host,
+                        connector.clone(),
+                        resolver.clone(),
+                        geo.clone(),
+                        out.clone(),
+                        &params,
+                    ).await;
+                    stats.record(outcome);
+                }
+            });
+        }
+        drop(tx_rec);
+        drop(tx_deferred);
 
-    // --- workers ---
-    // One global cadence shared by ALL DEEP workers. Limiting only the
-    // thread count would still allow a burst of simultaneous TCP handshakes.
-    // Skip missed ticks rather than catching up in bursts after slow probes.
-    let mut cadence = tokio::time::interval(
-        Duration::from_nanos(1_000_000_000 / u64::from(cli.deep_rate))
-    );
-    cadence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let deep_pacer = Arc::new(tokio::sync::Mutex::new(cadence));
-    let mut workers = JoinSet::new();
-    for _ in 0..thread_count {
-        let rx = rx_host.clone();
-        let connector = connector.clone();
-        let resolver = resolver.clone();
-        let geo = geo.clone();
-        let stats = stats.clone();
-        let out = tx_rec.clone();
-        let params = params.clone();
-        let deep_pacer = deep_pacer.clone();
-        workers.spawn(async move {
-            while let Ok(h) = rx.recv().await {
-                // Strict global start-rate cap, including DEEP-only runs.
-                // The mutex is held only until the next paced start.
-                deep_pacer.lock().await.tick().await;
-                let outcome = scanner::probe(
-                    h,
-                    connector.clone(),
-                    resolver.clone(),
-                    geo.clone(),
-                    out.clone(),
-                    &params,
-                )
-                .await;
-                stats.record(outcome);
-            }
-        });
-    }
-    // Drop the outer receiver/sender so that the channel closes once all
-    // spawned clones finish.
-    drop(rx_host);
-    drop(tx_rec);
-
-    let started = std::time::Instant::now();
-    let show_progress = !cli.domains_only && std::io::stdout().is_terminal();
-    if show_progress {
-        println!("SCAN | threads: {} | port: {} | DEEP rate: <= {} starts/s | HTTP bound to scanned IP: {}",
-            thread_count, cli.port, cli.deep_rate, if check_http { "YES" } else { "NO" });
-        println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
-    }
-    let progress_handle = if show_progress {
-        let stats = stats.clone();
-        Some(tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(3));
-            tick.tick().await;
-            loop {
+        let show_progress = std::io::stderr().is_terminal();
+        if show_progress {
+            eprintln!("SCAN | workers: {thread_count} | port: {} | DEEP: до {} стартов/с | HTTP: {}",
+                cli.port,cli.deep_rate, if check_http {"YES"} else {"NO"});
+            eprintln!("Результаты: {}",if cli.out.is_empty() {"(выключено)"} else {&cli.out});
+            eprintln!("{}",progress::line(
+                "DEEP",stats.snapshot().processed(),total,deep_started.elapsed()));
+        }
+        let progress_handle = if show_progress {
+            let stats = stats.clone();
+            Some(tokio::spawn(async move {
+                let mut tick=tokio::time::interval(Duration::from_secs(2));
                 tick.tick().await;
-                let snapshot = stats.snapshot();
-                eprintln!("[SCAN] проверено: {} | кандидатов: {} | отклонено: {} | {:.1} IP/с",
-                    snapshot.processed(),
-                    snapshot.accepted(),
-                    snapshot.rejected(),
-                    snapshot.processed() as f64 / started.elapsed().as_secs_f64().max(0.001));
-            }
-        }))
-    } else {
-        None
-    };
+                loop {
+                    tick.tick().await;
+                    eprintln!("{}",progress::line(
+                        "DEEP",stats.snapshot().processed(),total,deep_started.elapsed()));
+                }
+            }))
+        } else {None};
 
-    // Coordinated shutdown: watch for ctrl_c; when it fires, abort the
-    // producer so it drops its Host sender, which lets workers drain and
-    // exit. Matches spec item (11).
-    let mut interrupted = false;
-    let producer_result = if let Some(producer_handle) = producer_handle {
-        // Legacy DEEP-only mode retains its streaming producer and ctrl-c drain.
+        let mut interrupted = false;
         tokio::select! {
             _ = wait_workers(&mut workers) => {}
             _ = tokio::signal::ctrl_c() => {
                 interrupted = true;
-                producer_handle.abort();
-                wait_workers(&mut workers).await;
+                paused.store(true,Ordering::SeqCst);
+                if let Some(producer)=producer_handle.take() {
+                    producer.abort();
+                    let _ = producer.await;
+                }
+                eprintln!("[DEEP] Ctrl+C: останавливаем новые проверки, завершаем начатые...");
+                tokio::select! {
+                    _ = wait_workers(&mut workers) => {}
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("[DEEP] Повторный Ctrl+C: завершаем активные задачи.");
+                        workers.abort_all();
+                        wait_workers(&mut workers).await;
+                    }
+                }
             }
         }
-        if interrupted { Ok(()) } else { producer_handle.await? }
-    } else {
-        // FAST stage has already finished; Deep workers only consume the
-        // discovered, finite, and bounded list.
-        tokio::select! {
-            _ = wait_workers(&mut workers) => {}
-            _ = tokio::signal::ctrl_c() => {
-                interrupted = true;
-                workers.abort_all();
-                wait_workers(&mut workers).await;
+
+        let writer_result=writer_handle.await?;
+        if let Some(handle)=progress_handle {handle.abort();}
+        writer_result?;
+        if !interrupted {
+            if let Some(producer)=producer_handle.take() {
+                producer.await??;
             }
+            if !cli.domains_only {
+                eprintln!("{}",progress::line(
+                    "DEEP",stats.snapshot().processed(),total,deep_started.elapsed()));
+                println!("\nИТОГ СКАНИРОВАНИЯ\n{}",stats.snapshot().summary(deep_started.elapsed()));
+                if fast_was_interrupted {
+                    println!("FAST был прерван: обработаны только ранее найденные IP.");
+                }
+                println!("Примечание: TLS/HTTPS-кандидат не гарантирует совместимость с Xray REALITY.");
+            }
+            return Ok(());
         }
-        Ok(())
-    };
 
-    // At this point, workers are done; drop the last Record sender by waiting
-    // for the writer.
-    let writer_result = writer_handle.await?;
-    if let Some(handle) = progress_handle {
-        handle.abort();
+        let mut pending=Vec::new();
+        while let Ok(host)=rx_deferred.try_recv() {pending.push(host);}
+        while let Ok(host)=rx_host.try_recv() {pending.push(host);}
+        let snap=stats.snapshot();
+        eprintln!("[DEEP] Пауза: завершено {}, кандидатов {}, в очереди {}.",
+            snap.processed(),snap.accepted(),pending.len());
+        let choice=if interrupt::can_prompt(cli.domains_only) {
+            interrupt::prompt("DEEP",pending.len(),snap.processed(),snap.accepted()).await
+        } else {interrupt::Decision::Finish};
+        if choice == interrupt::Decision::Process && !pending.is_empty() {
+            total=Some(snap.processed()+pending.len() as u64);
+            let (tx,rx)=async_channel::unbounded();
+            for host in pending {tx.try_send(host)?;}
+            drop(tx);
+            rx_host=rx;
+            (tx_rec,rx_rec)=async_channel::bounded::<Record>(rec_cap);
+            append=true;
+            continue;
+        }
+        if let Some(path)=interrupt::checkpoint(&pending,&cli.out)? {
+            eprintln!("[DEEP] Сохранено {} непроверенных целей: {}",pending.len(),path.display());
+        } else {
+            eprintln!("[DEEP] Необработанных целей в очереди нет.");
+        }
+        if !cli.domains_only {
+            println!("\nЧАСТИЧНЫЙ ИТОГ\n{}",stats.snapshot().summary(deep_started.elapsed()));
+        }
+        if !interrupt::can_prompt(cli.domains_only) {
+            std::process::exit(130);
+        }
+        return Ok(());
     }
-    producer_result?;
-    writer_result?;
-    if !cli.domains_only {
-        println!("\nИТОГ СКАНИРОВАНИЯ\n{}", stats.snapshot().summary(started.elapsed()));
-        println!("Примечание: TLS/HTTPS-кандидат не гарантирует совместимость с Xray REALITY.");
-    }
-
-    Ok(())
 }
 
 async fn wait_workers(workers: &mut JoinSet<()>) {
