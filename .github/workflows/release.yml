@@ -62,7 +62,6 @@ jobs:
               -oL) output="$2"; shift 2 ;;
               -p) port="$2"; shift 2 ;;
               --rate|--wait) shift 2 ;;
-              --output-flush) shift ;;
               *) echo "Unexpected masscan arg: $1" >&2; exit 2 ;;
             esac
           done
@@ -158,10 +157,15 @@ jobs:
           exec /usr/bin/masscan "$@" --echo
           EOF
           chmod +x "$temp/masscan"
-          PATH="$temp:$PATH" ./target/release/realitlscanner \
+          if ! PATH="$temp:$PATH" ./target/release/realitlscanner \
             --addr 192.0.2.1/32 --fast --fast-rate 100 --fast-wait 1 \
             --thread 1 --timeout 1 --no-network-info \
-            --out "$temp/verified.csv" >"$temp/stdout" 2>"$temp/stderr"
+            --out "$temp/verified.csv" >"$temp/stdout" 2>"$temp/stderr"; then
+            echo "Real Masscan argument check failed:" >&2
+            cat "$temp/stderr" >&2
+            cat "$temp/stdout" >&2
+            exit 1
+          fi
           grep -Fq '[FAST] Готово: 0 уникальных IP' "$temp/stderr"
           grep -Fxq 'IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE' "$temp/verified.csv"
           ! grep -Fq 'unknown config option' "$temp/stderr"
