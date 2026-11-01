@@ -342,6 +342,18 @@ async fn main() -> Result<()> {
         rx_host
     };
 
+    // Reserve a fresh pair once per run, after all FAST preflight. Existing
+    // user files (including an explicit --out path) are never overwritten.
+    let result_pair=output::reserve_pair(&cli.out)?;
+    let (csv_path,html_path)=match result_pair {
+        Some((csv,html))=>(csv,Some(html)),
+        None=>(String::new(),None),
+    };
+    if !cli.domains_only {
+        eprintln!("[OUTPUT] CSV: {}", if csv_path.is_empty() {"(выключено)"} else {&csv_path});
+        if let Some(path)=html_path.as_ref() {eprintln!("[OUTPUT] HTML: {path}");}
+    }
+
     // Preserve the normal output format. On resuming a paused DEEP stage
     // close and flush the prior writer, then append without repeating CSV header.
     let started = std::time::Instant::now();
@@ -349,7 +361,7 @@ async fn main() -> Result<()> {
     if show_progress && !cli.domains_only {
         println!("SCAN | threads: {} | port: {} | DEEP rate: <= {} starts/s | HTTP bound to scanned IP: {}",
             thread_count, cli.port, cli.deep_rate, if check_http { "YES" } else { "NO" });
-        println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
+        println!("Результаты сохраняются в: {}", if csv_path.is_empty() { "(выключено)" } else { &csv_path });
     }
     // A single pacing clock remains shared across all rounds and workers.
     let mut cadence = tokio::time::interval(
@@ -363,7 +375,8 @@ async fn main() -> Result<()> {
     loop {
         let (tx_rec, rx_rec) = async_channel::bounded::<Record>(rec_cap);
         let writer_handle = tokio::spawn(output::writer(
-            rx_rec, cli.out.clone(), cli.domains_only, append_output
+            rx_rec, csv_path.clone(), cli.domains_only, append_output,
+            html_path.clone(),
         ));
         let paused = Arc::new(AtomicBool::new(false));
         let (tx_held, rx_held) = async_channel::unbounded::<Host>();
