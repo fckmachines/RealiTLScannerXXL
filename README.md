@@ -134,6 +134,42 @@ Note: this implements safe interruption rather than resumable Masscan
 packet-level progress. It does **not** automatically resume checking the
 original ASN after an interruption.
 
+## v0.5.5 — FAST and DEEP progress indicators
+
+When stderr is attached to a terminal, both scanning phases print progress
+every two seconds. Example:
+
+```text
+[FAST] 2500/4096 (61.0%) | осталось 1596 | 98.5 IP/с | ETA 0m 17s [оценка SYN]
+[DEEP] 68/213 (31.9%) | осталось 145 | 8.0 IP/с | ETA 0m 19s
+```
+
+- **FAST**: full target count comes from the prepared IP list. Masscan
+  does not expose a reliable packet-sent counter through list output,
+  so *processed* and ETA here are explicitly a **rate-based estimate**
+  (`--fast-rate` times time elapsed), **not** evidence those SYN packets
+  were actually transmitted or that hosts replied. At the end a separate
+  line reports the unique IP addresses with confirmed open TCP ports.
+- **DEEP**: completed count is actual completed TLS/DNS/HTTPS probes.
+  When started from FAST, its exact total is the number of unique IPs
+  with open TCP ports; when started from ASN or an inline finite CIDR/IP
+  list, the exact total is known up front. If DEEP resumes after Ctrl+C,
+  the total is recalculated from processed and queued targets.
+- For streaming `--in` and `--url` sources and the legacy infinite-IP
+  walk, the complete target count is not known in advance and progress
+  shows `всего ?`, `осталось ?`, `ETA ?`. On completion, final
+  processed count remains accurate; no fictitious percentage is printed.
+- Progress goes exclusively to stderr; `--domains-only` leaves stdout
+  reserved for found domain names. Non-TTY batch runs do not emit periodic
+  progress chatter, but end-of-run statistics are unchanged.
+- The existing Ctrl+C recovery introduced in v0.5.4 is retained.
+  Progress pauses while interruption choices are displayed and resumes
+  on the remaining collected targets without re-running Masscan.
+
+No performance/traffic presets changed. Existing default is 100 SYN/s,
+10 new DEEP probes/s, and 20-character certificate-domain limit.
+Low rates do not guarantee the hosting provider accepts scanning.
+
 ## Nine scan speed presets (v0.5.3)
 
 Interactive menu **[5] Скорость** now has nine ordered presets, a custom

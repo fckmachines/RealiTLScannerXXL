@@ -1,3 +1,14 @@
+# Next release — v0.5.5 (progress indicators)
+
+**Scope:** display exact completed/remaining/percentage and estimated
+completion time for DEEP where a finite target count is known, and
+explicitly labelled rate-based FAST estimates. Preserve the already
+released v0.5.4 Ctrl+C handling. Keep CLI stdout clean for
+`--domains-only`; do not claim exact totals for streaming sources.
+Status: implementation submitted, pending CI/release.
+
+---
+
 # Release v0.5.4 — shipped (2026-11-01)
 
 ## Feature: graceful Ctrl+C with processing of partial scan results

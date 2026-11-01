@@ -8,6 +8,7 @@ mod masscan;
 mod menu;
 mod network;
 mod output;
+mod progress;
 mod resolver;
 mod recovery;
 mod scanner;
@@ -124,6 +125,42 @@ fn build_client_config() -> Result<Arc<rustls::ClientConfig>> {
     Ok(Arc::new(cfg))
 }
 
+/// Exact counts for inline finite IPv4/CIDR lists; do not enumerate each
+/// address. Streaming files/URLs and the legacy bare-IP walk have no known
+/// total before the producer finishes.
+fn finite_addr_total(value: &str) -> Option<u64> {
+    use ipnet::IpNet;
+    if !value.contains('/') && !value.contains(',') {return None;}
+    let mut total = 0u64;
+    for item in value.split(',') {
+        let item=item.trim();
+        let count = if let Ok(net)=item.parse::<IpNet>() {
+            match net {
+                IpNet::V4(v4) => 1u64 << (32-v4.prefix_len()),
+                IpNet::V6(v6) => 1u64.checked_shl((128-v6.prefix_len()) as u32)?,
+            }
+        } else if item.parse::<std::net::IpAddr>().is_ok()
+            || crate::host::validate_domain(item) {
+            1
+        } else { return None; };
+        total=total.checked_add(count)?;
+    }
+    Some(total)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn finite_ip_lists_have_precise_count() {
+        assert_eq!(finite_addr_total("192.0.2.0/24"),Some(256));
+        assert_eq!(finite_addr_total("192.0.2.0/24,198.51.100.1"),Some(257));
+        assert_eq!(finite_addr_total("0.0.0.0/0"),Some(4_294_967_296));
+        assert_eq!(finite_addr_total("192.0.2.1"),None);
+        assert_eq!(finite_addr_total("not a valid range/33"),None);
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Match Go's environment hygiene before any HTTP/TLS activity.
@@ -226,6 +263,8 @@ async fn main() -> Result<()> {
     let stats = Arc::new(Stats::default());
 
     // --- producer ---
+    let source_total = asn_job.as_ref().map(|(_, n)| *n)
+        .or_else(|| cli.addr.as_deref().and_then(finite_addr_total));
     let ipv6 = cli.ipv6;
     let tx_host_producer = tx_host.clone();
     let producer: tokio::task::JoinHandle<Result<()>> = if let Some(addr) = cli.addr.clone() {
@@ -252,6 +291,7 @@ async fn main() -> Result<()> {
     drop(tx_host);
 
     let mut producer_handle = Some(producer);
+    let mut deep_total = source_total;
     // Do not create or truncate out.csv until FAST preflight has completed.
     // Live Masscan output is captured continuously, including before Ctrl+C.
     let mut target_receiver = if cli.fast {
@@ -272,6 +312,9 @@ async fn main() -> Result<()> {
         };
         producer_handle.take().expect("producer exists").await??;
         let discovery = masscan::discover(&workspace, cli.port, cli.fast_rate, cli.fast_wait).await?;
+        // DEEP's denominator is the unique open IPs, not the original
+        // full ASN/CIDR count scanned by FAST.
+        deep_total = Some(discovery.addresses.len() as u64);
         // Explicit drop is required before a noninteractive process::exit(130).
         drop(workspace);
         if discovery.interrupted {
@@ -302,27 +345,12 @@ async fn main() -> Result<()> {
     // Preserve the normal output format. On resuming a paused DEEP stage
     // close and flush the prior writer, then append without repeating CSV header.
     let started = std::time::Instant::now();
-    let show_progress = !cli.domains_only && std::io::stdout().is_terminal();
-    if show_progress {
+    let show_progress = std::io::stderr().is_terminal();
+    if show_progress && !cli.domains_only {
         println!("SCAN | threads: {} | port: {} | DEEP rate: <= {} starts/s | HTTP bound to scanned IP: {}",
             thread_count, cli.port, cli.deep_rate, if check_http { "YES" } else { "NO" });
         println!("Результаты сохраняются в: {}", if cli.out.is_empty() { "(выключено)" } else { &cli.out });
     }
-    let progress_handle = if show_progress {
-        let stats = stats.clone();
-        Some(tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_secs(3));
-            tick.tick().await;
-            loop {
-                tick.tick().await;
-                let snap = stats.snapshot();
-                eprintln!("[SCAN] проверено: {} | кандидатов: {} | отклонено: {} | {:.1} IP/с",
-                    snap.processed(), snap.accepted(), snap.rejected(),
-                    snap.processed() as f64 / started.elapsed().as_secs_f64().max(0.001));
-            }
-        }))
-    } else { None };
-
     // A single pacing clock remains shared across all rounds and workers.
     let mut cadence = tokio::time::interval(
         Duration::from_nanos(1_000_000_000 / u64::from(cli.deep_rate))
@@ -372,6 +400,27 @@ async fn main() -> Result<()> {
         }
         drop(tx_rec);
         drop(tx_held);
+        let round_started = std::time::Instant::now();
+        let round_base = stats.snapshot().processed();
+        if show_progress {
+            eprintln!("{}",progress::render(
+                "DEEP",round_base,deep_total,0,round_started.elapsed()));
+        }
+        let progress_handle = if show_progress {
+            let stats=stats.clone();
+            Some(tokio::spawn(async move {
+                let mut tick=tokio::time::interval(Duration::from_secs(2));
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    let snap=stats.snapshot();
+                    eprintln!("{}",progress::render(
+                        "DEEP",snap.processed(),deep_total,
+                        snap.processed().saturating_sub(round_base),
+                        round_started.elapsed()));
+                }
+            }))
+        } else {None};
         let mut interrupted = false;
         let mut forced = false;
 
@@ -407,6 +456,15 @@ async fn main() -> Result<()> {
         // that have NOT started a DEEP probe. Record senders are also gone;
         // await writer to flush CSV before asking any recovery question.
         writer_handle.await??;
+        if let Some(handle)=progress_handle {handle.abort();}
+        if show_progress {
+            let snap=stats.snapshot();
+            eprintln!("{}",progress::render(
+                "DEEP",snap.processed(),if interrupted {deep_total}
+                    else {Some(snap.processed())},
+                snap.processed().saturating_sub(round_base),
+                round_started.elapsed()));
+        }
         let mut pending = Vec::new();
         while let Ok(h) = target_receiver.try_recv() { pending.push(h); }
         while let Ok(h) = rx_held.try_recv() { pending.push(h); }
@@ -421,6 +479,7 @@ async fn main() -> Result<()> {
             menu::PauseAction::Save
         };
         if action == menu::PauseAction::Continue && !pending.is_empty() {
+            deep_total=Some(snapshot.processed().saturating_add(pending.len() as u64));
             let (tx, rx) = async_channel::unbounded();
             for h in pending { tx.try_send(h)?; }
             drop(tx);
@@ -435,7 +494,6 @@ async fn main() -> Result<()> {
         break;
     }
 
-    if let Some(handle) = progress_handle { handle.abort(); }
     if !cli.domains_only {
         println!("\nИТОГ СКАНИРОВАНИЯ\n{}", stats.snapshot().summary(started.elapsed()));
         if paused_any { println!("Сканирование завершено после остановки Ctrl+C."); }

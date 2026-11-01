@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use async_channel::Receiver;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,8 +128,24 @@ async fn discover_with(
     let mut lines = BufReader::new(stdout).lines();
     let mut found = HashSet::new();
     let mut interrupted = false;
+    let started = std::time::Instant::now();
+    let show_progress = std::io::stderr().is_terminal();
+    let mut ticks = tokio::time::interval(Duration::from_secs(2));
+    ticks.tick().await;
+    if show_progress {
+        eprintln!("{} [оценка количества отправленных SYN, не счётчик Masscan]",
+            crate::progress::render("FAST",0,Some(workspace.targets),0,started.elapsed()));
+    }
     loop {
         tokio::select! {
+            _ = ticks.tick(), if show_progress => {
+                // Masscan exposes no reliable sent-count through -oL. This
+                // rate-based figure is an estimate, NOT observed packets.
+                let estimate=((started.elapsed().as_secs_f64()*rate as f64) as u64)
+                    .min(workspace.targets);
+                eprintln!("{} [оценка SYN]",
+                    crate::progress::render("FAST",estimate,Some(workspace.targets),estimate,started.elapsed()));
+            }
             line = lines.next_line() => match line.context("Ошибка чтения stdout Masscan")? {
                 Some(line) => {
                     if let Some(ip) = parse_open(&line, port) { found.insert(ip); }
@@ -169,6 +186,11 @@ async fn discover_with(
     }
     let mut addresses: Vec<_> = found.into_iter().collect();
     addresses.sort_unstable();
+    if show_progress && !interrupted {
+        eprintln!("{} [Masscan завершил отправку и сбор ответов]",
+            crate::progress::render("FAST",workspace.targets,Some(workspace.targets),
+                workspace.targets,started.elapsed()));
+    }
     eprintln!("[FAST] {}: {} уникальных IP с TCP/{port}.",
         if interrupted { "Прервано" } else { "Готово" }, addresses.len());
     Ok(Discovery { addresses, interrupted })
