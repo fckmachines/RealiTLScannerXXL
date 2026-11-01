@@ -1,3 +1,71 @@
+# Next release — v0.6.1 (PLANNED; no code changes)
+
+## Compact scan metadata and transparent scoring in offline HTML
+
+Requested 2026-11-01. Scope is **HTML presentation only**. No additional
+mandatory eligibility filters, packet-rate modifications, changes to FAST/DEEP,
+Ctrl+C handling, result filenames, SAN processing, CLI flags or existing CSV
+schema. Do not implement until explicitly authorized.
+
+### Above results: compact 1–2-line scan summary
+
+Show scan source (ASN / CIDR(s) / input file / URL), scan date/time,
+requested target count versus actual probed count, matched candidates,
+FAST and DEEP rates, and relevant ASN operator. For ASN scans, reuse the
+existing RIPEstat operator name, ASN number, total covered IPv4 and
+unique advertised prefixes from the **preflight result**. Do not confuse
+an ASN operator with the RDAP registered IP-block holder. Display
+a block holder only when actually verified through an authoritative
+RDAP result; otherwise show 'не проверено'. For non-ASN input,
+do not invent an ASN or full-scan percentage. Clearly mark sampled,
+full, interrupted and unknown-size inputs. Avoid lengthy tables.
+
+### Below results: one collapsed <details> section
+
+Label: 'Рейтинг: методика и базовые 60 баллов'. Explain succinctly:
+
+* Base +60 is assigned to **every result that passed the checks enabled
+  for this particular scan**, not 60 separate measurements. Core checks:
+  completed TLS 1.3 handshake with client X25519-only key exchange,
+  negotiated HTTP/2 'h2', at least one certificate with nonempty issuer,
+  a candidate CN/SAN hostname within the configured length cap.
+* For --reality-sni add concrete non-wildcard candidate, named CDN
+  suffix exclusion, DNS forward resolution including the scanned IP,
+  and IP-pinned HTTPS request (SNI/Host, certificate hostname checked,
+  allowed response 200/301/302, no known parked-page marker).
+  Geo exclusion applies only if requested.
+* Without --reality-sni some checks are **not** mandatory: do not claim
+  they passed. --check-http is optional unless implied by --reality-sni.
+  Never imply the initial TLS connection validated the certificate chain:
+  its custom verifier deliberately skips that; the later HTTPS request
+  does normal trust/hostname verification when enabled.
+* Existing formula in src/output.rs is exactly:
+  60 base + 10 iff selected candidate was a SAN alternative +
+  10 iff HTTPS verification was enabled and passed + one of
+  {15 if TLS <200ms, 8 if <500ms, 3 if <1000ms, 0 otherwise}.
+  Max currently **95**, not 100; SAN's extra 10 are a heuristic and
+  not evidence of greater reliability than CN.
+* Neither the score nor its new explanation excludes additional domains.
+  It does not prove long-term stability, geographic reachability,
+  non-VPN/non-proxy content, trustworthiness, or actual Xray compatibility.
+* Keep explanatory copy short, with a narrow compact table/summary;
+  HTML must remain usable offline and safe to render with untrusted
+  domain/issuer/organization strings properly escaped.
+
+### Acceptance tests
+
+1. Report from an ASN scan includes grounded operator/ASN and accurate
+   sample/full counts; CIDR/file/URL reports do not fabricate ASN data.
+2. Empty and interrupted scans do not display false completion stats.
+3. Existing result table/search/sort still work; HTML has concise header
+   and collapsed score details; CSS/markup remains offline.
+4. Unit tests cover absent metadata, escaping, and score boundary bands.
+5. Existing five-column CSV, no-overwrite filenames, SAN acceptance,
+   v0.5.4 Ctrl+C and Masscan integration tests all remain passing.
+6. Run test/build/smoke/real-Masscan-parser CI before any release.
+
+---
+
 # Release v0.5.5 — shipped (2026-11-01)
 
 **Scope:** display exact completed/remaining/percentage and estimated
