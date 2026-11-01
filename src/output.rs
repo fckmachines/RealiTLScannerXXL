@@ -28,6 +28,7 @@ pub async fn writer(
     rx: async_channel::Receiver<Record>,
     out_path: String,
     domains_only: bool,
+    append: bool,
 ) -> anyhow::Result<()> {
     // Wrap the output file in a BufWriter: every raw `write_all` on a
     // `tokio::fs::File` is dispatched to the blocking-fs pool, so at high
@@ -36,10 +37,22 @@ pub async fn writer(
     let mut file = if out_path.is_empty() {
         None
     } else {
-        let f = tokio::fs::File::create(&out_path).await?;
-        let mut f = BufWriter::new(f);
-        f.write_all(b"IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n")
-            .await?;
+        let header_needed = !append
+            || match tokio::fs::metadata(&out_path).await {
+                Ok(metadata) => metadata.len() == 0,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => return Err(e.into()),
+            };
+        let file = if append {
+            tokio::fs::OpenOptions::new()
+                .create(true).append(true).open(&out_path).await?
+        } else {
+            tokio::fs::File::create(&out_path).await?
+        };
+        let mut f = BufWriter::new(file);
+        if header_needed {
+            f.write_all(b"IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE\n").await?;
+        }
         Some(f)
     };
 
@@ -86,6 +99,32 @@ pub async fn writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn append_preserves_existing_rows_and_header() {
+        let path=std::env::temp_dir().join(format!(
+            "realitlscanner-output-{}.csv",std::process::id()));
+        let _=std::fs::remove_file(&path);
+        let (tx,rx)=async_channel::bounded(2);
+        tx.send(Record {
+            ip: "192.0.2.1".parse().unwrap(), origin:"test".into(),
+            cert_domain:"a.test".into(),cert_issuer:"issuer".into(),geo:"US".into()
+        }).await.unwrap();
+        drop(tx);
+        writer(rx,path.to_string_lossy().into_owned(),false,false).await.unwrap();
+        let (tx,rx)=async_channel::bounded(2);
+        tx.send(Record {
+            ip: "192.0.2.2".parse().unwrap(),origin:"test".into(),
+            cert_domain:"b.test".into(),cert_issuer:"issuer".into(),geo:"US".into()
+        }).await.unwrap();
+        drop(tx);
+        writer(rx,path.to_string_lossy().into_owned(),false,true).await.unwrap();
+        let result=tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(result.matches("IP,ORIGIN,CERT_DOMAIN").count(),1);
+        assert!(result.contains("192.0.2.1"));
+        assert!(result.contains("192.0.2.2"));
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 
     #[test]
     fn format_record_basic_row() {
