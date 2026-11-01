@@ -9,7 +9,9 @@ use rustls::pki_types::ServerName;
 use rustls::ProtocolVersion;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::collections::HashSet;
+use x509_parser::extensions::GeneralName;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
@@ -32,6 +34,51 @@ struct ProbeOk {
     version: Option<ProtocolVersion>,
     cn: String,
     issuer: String,
+    san_dns: Vec<String>,
+}
+
+
+fn candidate_names(cn: &str, sans: &[String], max_chars: usize) -> Vec<(String, bool)> {
+    let mut names=Vec::new();
+    let mut seen=HashSet::new();
+    for (value, via_san) in std::iter::once((cn,false))
+        .chain(sans.iter().map(|s|(s.as_str(),true))) {
+        let name=value.trim_end_matches('.').to_ascii_lowercase();
+        if name.is_empty() || name.starts_with("*.") ||
+            name.parse::<std::net::IpAddr>().is_ok() ||
+            !name.contains('.') || !crate::host::validate_domain(&name) ||
+            filter::is_domain_too_long(&name,max_chars) {continue;}
+        if !seen.insert(name.clone()) {continue;}
+        names.push((name, via_san));
+        if names.len()==8 {break;}
+    }
+    names
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    #[test]
+    fn cn_is_kept_and_san_expands_without_new_rejections() {
+        let sans=vec!["www.example.org".into(),"legacy.test".into(),
+            "*.example.org".into(),"toolong-subdomain.example.org".into(),
+            "new.example.net".into()];
+        let names=candidate_names("Legacy.Test",&sans,20);
+        assert_eq!(names,vec![
+            ("legacy.test".into(),false),
+            ("www.example.org".into(),true),
+            ("new.example.net".into(),true)
+        ]);
+        assert_eq!(candidate_names("", &["other.test".into()],20),
+            vec![("other.test".into(),true)]);
+        assert!(candidate_names("",&[],20).is_empty());
+    }
+    #[test]
+    fn huge_san_cert_capped_at_eight() {
+        let many=(0..100).map(|i|format!("d{i}.example.org")).collect::<Vec<_>>();
+        assert_eq!(candidate_names("example.org",&many,20).len(),8);
+        assert!(candidate_names("long-domain.example.org",&[],20).is_empty());
+    }
 }
 
 pub async fn probe(
@@ -67,6 +114,7 @@ pub async fn probe(
     let ip = host.ip.expect("ip resolved above");
     let addr = SocketAddr::new(ip, params.port);
 
+    let tls_start = Instant::now();
     let probe_fut = async {
         let tcp = TcpStream::connect(addr).await?;
 
@@ -100,11 +148,18 @@ pub async fn probe(
             .filter_map(|a| a.as_str().ok().map(|s| s.to_owned()))
             .collect();
         let issuer = orgs.join(" | ");
+        let san_dns=parsed.subject_alternative_name().ok().flatten()
+            .map(|san| san.value.general_names.iter().filter_map(|name| {
+                if let GeneralName::DNSName(value)=name {
+                    Some(value.to_string())
+                } else {None}
+            }).collect::<Vec<_>>()).unwrap_or_default();
         Ok::<_, anyhow::Error>(ProbeOk {
             alpn,
             version,
             cn,
             issuer,
+            san_dns,
         })
     };
 
@@ -119,65 +174,62 @@ pub async fn probe(
         }
         Ok(Ok(r)) => {
             let feasible = matches!(r.version, Some(ProtocolVersion::TLSv1_3))
-                && r.alpn == b"h2"
-                && !r.cn.is_empty()
-                && !r.issuer.is_empty();
+                && r.alpn == b"h2" && !r.issuer.is_empty();
             if !feasible {
-                tracing::debug!(
-                    %ip, origin = %host.origin,
-                    alpn = %String::from_utf8_lossy(&r.alpn),
-                    cn = %r.cn, issuer = %r.issuer,
-                    "TLS/ALPN/certificate incompatible"
-                );
+                tracing::debug!(%ip, "TLS/ALPN/issuer incompatible");
                 return Outcome::TlsIncompatible;
             }
-
-            // Certificate length check is intentionally before the potentially
-            // slow forward DNS lookup and IP-pinned HTTPS request.
-            if filter::is_domain_too_long(&r.cn, params.max_domain_length) {
-                tracing::debug!(%ip, cn = %r.cn, max = params.max_domain_length, "certificate CN too long");
+            let tls_ms=tls_start.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            let names=candidate_names(&r.cn,&r.san_dns,params.max_domain_length);
+            if names.is_empty() {
+                if r.cn.is_empty() && r.san_dns.is_empty() {
+                    return Outcome::TlsIncompatible;
+                }
                 return Outcome::DomainTooLong;
             }
-
-            let geo_code = geo.country_code(ip);
-            if params.reality_sni && filter::is_wildcard_cn(&r.cn) {
-                tracing::debug!(%ip, cn = %r.cn, "reality-sni: wildcard CN");
-                return Outcome::WildcardCert;
-            }
-            if params.reality_sni && filter::is_shared_cdn_cn(&r.cn) {
-                tracing::debug!(%ip, cn = %r.cn, "reality-sni: shared CDN cert");
-                return Outcome::SharedCdn;
-            }
+            let geo_code=geo.country_code(ip);
             if !params.exclude_geo.is_empty()
-                && filter::is_excluded_geo(&geo_code, &params.exclude_geo)
-            {
-                tracing::debug!(%ip, geo = %geo_code, "excluded geo");
+                && filter::is_excluded_geo(&geo_code,&params.exclude_geo) {
                 return Outcome::ExcludedGeo;
             }
-            if params.reality_sni && !filter::forward_verify(&dns, &r.cn, ip).await {
-                tracing::debug!(%ip, cn = %r.cn, "reality-sni: forward-verify failed");
-                return Outcome::ForwardDnsFailed;
-            }
-            // This request uses r.cn for SNI and Host but forces TCP to the
-            // scanned ip:port. No redirects are followed to other hosts.
-            if params.check_http
-                && !filter::check_http(&r.cn, ip, params.port, params.timeout).await
-            {
-                tracing::debug!(%ip, cn = %r.cn, "IP-pinned HTTPS check failed");
-                return Outcome::HttpFailed;
-            }
 
-            let rec = Record {
-                ip,
-                origin: host.origin,
-                cert_domain: r.cn,
-                cert_issuer: r.issuer,
-                geo: geo_code,
-            };
-            if out.send(rec).await.is_err() {
-                tracing::warn!("results channel closed");
+            let mut had_forward_match=false;
+            let mut had_filtered_name=false;
+            for (name, via_san) in names {
+                if params.reality_sni && filter::is_shared_cdn_cn(&name) {
+                    had_filtered_name=true;
+                    continue;
+                }
+                if params.reality_sni && !filter::forward_verify(&dns,&name,ip).await {
+                    continue;
+                }
+                had_forward_match=true;
+                if params.check_http
+                    && !filter::check_http(&name,ip,params.port,params.timeout).await {
+                    continue;
+                }
+                let rec=Record {
+                    ip,
+                    origin:host.origin.clone(),
+                    cert_domain:name,
+                    cert_issuer:r.issuer.clone(),
+                    geo:geo_code,
+                    tls_ms,
+                    san_count:r.san_dns.len().min(u16::MAX as usize) as u16,
+                    via_san,
+                    verified_http:params.check_http,
+                };
+                if out.send(rec).await.is_err() {
+                    tracing::warn!("results channel closed");
+                }
+                return Outcome::Accepted;
             }
-            Outcome::Accepted
+            if params.check_http && had_forward_match {return Outcome::HttpFailed;}
+            if params.reality_sni && had_filtered_name && !had_forward_match {
+                return Outcome::SharedCdn;
+            }
+            if params.reality_sni {return Outcome::ForwardDnsFailed;}
+            Outcome::TlsIncompatible
         }
     }
 }
