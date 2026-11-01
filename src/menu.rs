@@ -114,7 +114,7 @@ async fn prompt_pause(has_pending: bool, default: PauseAction) -> Result<PauseAc
 }
 
 pub async fn pause_fast(found: usize) -> Result<PauseAction> {
-    eprintln!("\\nFAST SCAN paused (Ctrl+C): найдено {found} IP с TCP/443.");
+    eprintln!("\nFAST SCAN paused (Ctrl+C): найдено {found} IP с TCP/443.");
     if found == 0 {
         eprintln!("   Нет найденных IP для DEEP-проверки.");
         return Ok(PauseAction::Exit);
@@ -127,7 +127,7 @@ pub async fn pause_fast(found: usize) -> Result<PauseAction> {
 }
 
 pub async fn pause_deep(checked: u64, accepted: u64, remaining: usize) -> Result<PauseAction> {
-    eprintln!("\\nDEEP SCAN paused (Ctrl+C).");
+    eprintln!("\nDEEP SCAN paused (Ctrl+C).");
     eprintln!("   Проверено: {checked} | кандидатов: {accepted} | осталось: {remaining}");
     if remaining == 0 {
         eprintln!("   Все оставшиеся цели уже обработаны.");
