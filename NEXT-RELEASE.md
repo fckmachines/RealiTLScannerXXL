@@ -1,4 +1,4 @@
-# Next release — v0.5.4 (PLANNED, NOT IMPLEMENTED)
+# Release v0.5.4 — shipped (2026-11-01)
 
 ## Feature: graceful Ctrl+C with processing of partial scan results
 
@@ -103,7 +103,7 @@ settings from the original run.
 8. Publish Linux AMD64 v0.5.4 **only after** Rust tests, release build, and
    interruption smoke tests pass in GitHub Actions.
 
-**Current status:** planning only. No Ctrl+C behavior has been changed.
+**Current status:** implemented and released in v0.5.4. Tests included synthetic interrupted Masscan streaming, noninteractive interrupted DEEP over loopback, CSV append-on-resume, and private recovery file persistence. See [PR #9](https://github.com/fckmachines/RealiTLScannerXXL/pull/9) and [v0.5.4](https://github.com/fckmachines/RealiTLScannerXXL/releases/tag/v0.5.4). **Operational limitation:** this release salvages Masscan reports already flushed to stdout; an immediate second interruption may abandon an in-flight TLS probe, and no reliable exact number of SYN attempts is provided. Test interactively on the actual VPS to validate terminal signal UX.
 
 ---
 
