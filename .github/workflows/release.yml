@@ -62,12 +62,21 @@ jobs:
               -oL) output="$2"; shift 2 ;;
               -p) port="$2"; shift 2 ;;
               --rate|--wait) shift 2 ;;
+              --output-flush) shift ;;
               *) echo "Unexpected masscan arg: $1" >&2; exit 2 ;;
             esac
           done
           [[ -f "$input" && "$port" == 443 && -n "$output" ]]
           grep -Fxq '192.0.2.1' "$input"
-          printf 'open tcp 443 192.0.2.1 1700000000\n' > "$output"
+          if [[ "$output" == "-" ]]; then
+            printf 'open tcp 443 192.0.2.1 1700000000\n'
+          else
+            printf 'open tcp 443 192.0.2.1 1700000000\n' > "$output"
+          fi
+          if [[ "${FAKE_MASSCAN_HOLD:-0}" == "1" ]]; then
+            touch "${FAKE_MASSCAN_MARKER:?}"
+            exec sleep 30
+          fi
           EOF
           chmod +x "$temp/masscan"
           PATH="$temp:$PATH" ./target/release/realitlscanner \
@@ -88,6 +97,46 @@ jobs:
           fi
           test "$(cat "$probe_csv")" = "KEEP_EXISTING_RESULTS"
           rm -f "$probe_csv"
+
+          # Synthetic interrupted FAST: the child emits one open TCP result,
+          # keeps running, and the scanner receives SIGINT. No Internet probe.
+          FAKE_MASSCAN_HOLD=1 FAKE_MASSCAN_MARKER="$temp/started" PATH="$temp:$PATH" \
+            ./target/release/realitlscanner --addr 192.0.2.1/32 \
+            --fast --no-network-info --out "$temp/partial.csv" \
+            >"$temp/partial.stdout" 2>"$temp/partial.stderr" &
+          fast_pid=$!
+          for ((i=0;i<100;i++)); do
+            [[ -f "$temp/started" ]] && break
+            sleep 0.1
+          done
+          test -f "$temp/started"
+          kill -INT "$fast_pid"
+          fast_code=0
+          wait "$fast_pid" || fast_code=$?
+          test "$fast_code" -eq 130
+          test ! -f "$temp/partial.csv"
+          grep -Fq '[FAST] Прервано: 1' "$temp/partial.stderr"
+          grep -Flx '192.0.2.1' "$temp"/realitlscanner-pending-*.txt
+
+          # Synthetic interrupted DEEP, using loopback only, ensures
+          # queued targets remain recoverable and CSV is flushed.
+          ./target/release/realitlscanner --addr 127.0.0.0/24 \
+            --no-network-info --deep-rate 1 --thread 1 --timeout 1 \
+            --out "$temp/deep.csv" >"$temp/deep.stdout" \
+            2>"$temp/deep.stderr" &
+          deep_pid=$!
+          for ((i=0;i<100;i++)); do
+            [[ -f "$temp/deep.csv" ]] && break
+            sleep 0.1
+          done
+          test -f "$temp/deep.csv"
+          kill -INT "$deep_pid"
+          deep_code=0
+          wait "$deep_pid" || deep_code=$?
+          test "$deep_code" -eq 130
+          grep -Fxq 'IP,ORIGIN,CERT_DOMAIN,CERT_ISSUER,GEO_CODE' "$temp/deep.csv"
+          grep -Fq 'Осталось непроверенных целей' "$temp/deep.stderr"
+          grep -l '127.0.0.' "$temp"/realitlscanner-pending-*.txt
 
       - name: Publish release when version is new
         if: github.event_name != 'pull_request'
